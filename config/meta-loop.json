@@ -1,0 +1,29 @@
+{
+	"enabled": true,
+	"roles": {
+		"orchestrator": {
+			"model": "",
+			"tools": ["read", "bash", "ls", "find", "grep"]
+		},
+		"supervisor": {
+			"model": "",
+			"tools": ["read", "bash", "ls", "find", "grep"]
+		},
+		"worker": {
+			"model": "",
+			"tools": ["read", "write", "edit", "bash", "ls", "find", "grep"]
+		}
+	},
+	"supervisor": {
+		"auto": true,
+		"checkIntervalMinutes": 30,
+		"workerStartThreshold": 6,
+		"maxConsecutiveFailures": 2
+	},
+	"limits": {
+		"maxTasks": 8,
+		"concurrency": 1,
+		"perTaskOutputCap": 51200
+	},
+	"notes": "model が空なら pi のデフォルトモデルを継承。supervisor.checkIntervalMinutes = Orchestrator 起動後の定期監査間隔（分）。workerStartThreshold = この数の Worker が起動したら一度監査する。"
+}
