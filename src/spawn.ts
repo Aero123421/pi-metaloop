@@ -82,11 +82,21 @@ function getFinalText(messages: Message[]): string {
 export async function runRole(
 	role: LoadedRole,
 	task: string,
-	opts: { cwd: string; signal?: AbortSignal; outputCap?: number; onProgress?: (text: string) => void },
+	opts: {
+		cwd: string;
+		signal?: AbortSignal;
+		outputCap?: number;
+		onProgress?: (text: string) => void;
+		/** extra CLI args (e.g. -e scope-guard.ts) */
+		extraArgs?: string[];
+		/** extra env vars for the child process */
+		extraEnv?: Record<string, string>;
+	},
 ): Promise<RoleRunResult> {
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	if (role.model) args.push("--model", role.model);
 	if (role.tools && role.tools.length > 0) args.push("--tools", role.tools.join(","));
+	if (opts.extraArgs?.length) args.push(...opts.extraArgs);
 
 	const promptPath = await writePromptToTempFile(role.name, role.systemPrompt);
 
@@ -103,7 +113,11 @@ export async function runRole(
 			cwd: opts.cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, PI_META_LOOP_DEPTH: String(depth + 1) },
+			env: {
+				...process.env,
+				PI_META_LOOP_DEPTH: String(depth + 1),
+				...(opts.extraEnv ?? {}),
+			},
 		});
 
 		let buffer = "";

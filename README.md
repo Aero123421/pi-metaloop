@@ -177,14 +177,13 @@ Other knobs:
 
 - `enabled` — kill switch
 - `roles.<role>.tools` — tools available to the role
-- `supervisor.auto` — enable automatic supervision hooks
-- `supervisor.checkIntervalMinutes` — periodic check interval (default 30)
-- `supervisor.workerStartThreshold` — check after this many worker starts (default 6)
-- `supervisor.maxConsecutiveFailures` — immediate check after this many consecutive failures (default 2)
-- `executor.sfhEnabled` — delegate `execution: "sfh"` group tickets to sfh (default true)
-- `executor.sfhBinary` — sfh binary name/path (default `sfh`)
-- `executor.timeoutSec` — wall-clock limit per group (default 1800)
-- `executor.maxParallel` — sfh max parallel branches (default 4)
+- `supervisor.*` — automatic supervision hooks
+- `executor.*` — sfh delegation and models
+- `escalation.enabled` — soft long-task nudge (default true)
+- `escalation.toolCallThreshold` — default 20
+- `escalation.distinctPathThreshold` — default 8
+- `escalation.writeThreshold` — default 5
+- `escalation.promptLengthThreshold` — default 400
 - `limits.maxTasks` — ticket cap (default 8)
 - `limits.perTaskOutputCap` — output cap per subprocess
 
@@ -215,7 +214,8 @@ Implementation tickets stay native (Worker pi subprocesses). Groups are for para
 - `/tasks` — show the current task board
 - `/verdicts` — Supervisor verdict history
 - `/sfh` — list recent sfh runs and inspect one; `/sfh stop` stops the newest run
-- Footer shows a thin status line while supervised: `supervised executing 3 tasks ●1 ✓2 review:green`
+- Footer shows a thin status line while supervised: `supervised executing 3 tasks ●1 ✓2 verdict:green`
+- Soft escalation: if the Primary session accumulates many tool calls / file touches / writes, or the user prompt looks like a long brief, pi-metaLoop nudges once to consider `orchestrate` (never forces it)
 - If an sfh flow is running in the project, the footer shows live progress (`sfh:<flow> ●running step:<id> fanout 2/3 $0.31 12m`) and a widget appears above the editor. Runs started outside pi are visible too; `stuck` runs always notify.
 
 Users see one conversation. Internal chatter is not surfaced — only the plan, detected misalignments, decisions that truly need you, and final results.
@@ -238,8 +238,8 @@ This extension spawns `pi` subprocesses with your full permissions. Agent prompt
 - [x] Phase 1 — orchestrate tool, initial supervision, G/Y/R, task tickets, per-role models
 - [x] Phase 2 — automatic Supervisor hooks, step-driven Orchestrator, guidance injection, conversation context, standards
 - [x] sfh TUI monitor — live `status.json` polling, footer/widget, `/sfh` command, nesting guard
-- [x] Phase 2.5 — sfh execution backend: group tickets, integration contract, flow.yaml generation, result collection (sfh is a required dependency)
-- [ ] Phase 2.75 — guard extension enforcing `allowed_scope` inside worker subprocesses
+- [x] Phase 2.5 — sfh execution backend: group tickets, integration contract, flow.yaml generation, result collection
+- [x] Hardening — docs cleanup, sfh ticket validation, allowed_scope guard, soft long-task escalation
 - [ ] Phase 3 — harness diagnosis (repeated failures → rules/skills/prompts weaknesses)
 - [ ] Phase 4 — evolution loop (logs + scores, external improver) — research-grade, optional
 

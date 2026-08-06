@@ -12,6 +12,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { EscalationSettings } from "./escalation.ts";
+import { defaultEscalation } from "./escalation.ts";
 
 export interface RoleConfig {
 	/** pi --model 形式 (provider/model-id)。空 = pi デフォルト継承 */
@@ -64,6 +66,7 @@ export interface MetaLoopConfig {
 	};
 	supervisor: SupervisorSettings;
 	executor: ExecutorSettings;
+	escalation: EscalationSettings;
 	limits: {
 		maxTasks: number;
 		concurrency: number;
@@ -93,6 +96,7 @@ const defaultConfig: MetaLoopConfig = {
 		sfhIntegrateModel: "",
 		sfhToolModels: {},
 	},
+	escalation: { ...defaultEscalation },
 	limits: {
 		maxTasks: 8,
 		concurrency: 1,
@@ -139,6 +143,9 @@ function applyLayer(merged: any, layer: Record<string, unknown> | null): void {
 			};
 		}
 	}
+	if (layer.escalation && typeof layer.escalation === "object") {
+		merged.escalation = { ...merged.escalation, ...layer.escalation };
+	}
 }
 
 export function loadConfig(cwd: string): MetaLoopConfig {
@@ -164,6 +171,7 @@ export function loadConfig(cwd: string): MetaLoopConfig {
 		},
 		supervisor: { ...defaultConfig.supervisor },
 		executor: { ...defaultConfig.executor, sfhToolModels: { ...(defaultConfig.executor.sfhToolModels ?? {}) } },
+		escalation: { ...defaultConfig.escalation },
 		limits: { ...defaultConfig.limits },
 	};
 	for (const layer of layers) applyLayer(merged, layer);

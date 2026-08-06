@@ -1,6 +1,6 @@
 # DESIGN — pi-metaLoop
 
-この文書は実装よりも先に固めた設計判断の記録。迷ったらここに戻る。
+この文書は設計判断の記録。迷ったらここに戻る。
 
 ## 正体
 
@@ -16,121 +16,118 @@
 ```text
 Primary       = 意図の所有者（ユーザー窓口は常に Primary）
 Orchestrator  = 実行計画の所有者（スコープ変更禁止）
-Supervisor      = 異常の検出者・メタ認知役（実装禁止・再解釈禁止・Worker 直接介入禁止）
+Supervisor    = 異常の検出者・メタ認知役（実装禁止・再解釈禁止・Worker 直接介入禁止）
 Worker        = 担当成果物の所有者（スコープ外変更禁止）
+sfh           = 並列実行の配管（判断はしない）
 ```
 
-危険なのは「誰がユーザーの意図を最終決定するか」が曖昧になること。
 決定権は常に Primary 一つ。
 
 ## 非対称起動
 
 - 短タスク（git 確認・議論・小修正）: 追加階層ゼロ
-- 長タスク: のみ監督レイヤー
-- 迷ったら short で始めて、膨らんだら途中昇格（誤爆より安全）
+- 長タスク: Primary が `orchestrate` を呼ぶのが正式入口
+- **ソフトな途中昇格**（強制しない）:
+  - Primary セッションの tool 回数・触ったパス数・write 数、または長い要求文を検知
+  - セッションあたり一度だけ notify + コンテキスト注入で `orchestrate` を検討させる
+  - 閾値は `escalation.*`（config）
 
 ## 作業票は時間でなく完了条件で切る
 
-「AI が 30 分」は内部目安。外側の契約は:
-
 ```yaml
 task_id / goal / deliverables / acceptance / allowed_scope / forbidden / dependencies / report
+# グループ時:
+execution: sfh
+branches: [{ id, tool, model?, prompt }]
+integration: { acceptance: [...] }   # 必須
 ```
 
 1 チケット = 1 つの明確な成果物 + 1 つの検証方法 + 限定された変更範囲。
 
 ## 役割と基準の分離
 
-- `agents/supervisor.md` = **どう見るか**（役割・判定方法・出力形式）。普遍。
-- `config/standards.md` + `<プロジェクト>/.pi/meta-loop-standards.md` = **何を見るか**（実装基準・チェック項目）。プロジェクトごとに変わる。
-- runtime が基準を読み込み、Supervisor には「点検基準（判定根拠）」、Orchestrator には「実装基準（チケットに反映）」として注入する
-- Worker には基準を直接渡さない。Orchestrator がチケットに落とし込んだ分だけ受け取る
-- 基準にない事項で Supervisor が yellow/red を出さない規律をプロンプトで固定（過剰介入防止）
+- `agents/supervisor.md` = **どう見るか**（役割・判定方法・出力形式）
+- `config/standards.md` + `~/.pi/agent/meta-loop/standards.md` + `.pi/meta-loop/standards.md` = **何を見るか**
+- Supervisor / Orchestrator に注入。Worker にはチケット経由のみ
+- 基準にない事項で yellow/red にしない
 
 ## 設定の置き場所（3層）
 
 ```text
 1. 拡張リポジトリ/config/meta-loop.json
-2. ~/.pi/agent/meta-loop/config.json     ← 役別モデル・sfh モデルの本命
+2. ~/.pi/agent/meta-loop/config.json     ← 役別・sfh モデルの本命
 3. <cwd>/.pi/meta-loop/config.json       ← プロジェクト固有
 ```
 
-基準も同フォルダ: `standards.md`。レガシーの単一ファイル（`.pi/meta-loop.json` / `.pi/meta-loop-standards.md`）も読む。
+レガシーの `.pi/meta-loop.json` / `.pi/meta-loop-standards.md` も読む。
 
 ## モデル割り当て（2系統）
 
-1. **roles.\*.model** — Orchestrator / Supervisor / Worker の pi サブプロセス（`--model`）
-2. **executor.sfh\*** — sfh ステップの model
+1. **roles.\*.model** — Orchestrator / Supervisor / Worker の pi サブプロセス
+2. **executor.sfh\*** — sfh ステップ
    - ブランチ: `branches[].model` > `sfhToolModels[tool]` > `sfhModel` > (pi なら worker.model)
    - 統合: `sfhIntegrateModel` > `sfhModel` > worker.model
 
-sfh の schema は step / defaults / profile で `model` をサポートしている（v1.1.4 確認済み）。
+監視役と作業役でモデルを分けるのが設計上の意図。
 
 ## 入れ子起動の防止（決定的）
 
-- `PI_META_LOOP_DEPTH` 環境変数で階層を追跡する
-- depth 0 = Primary の pi（orchestrate 登録・sfh 委譲可）
-- depth ≥ 1 = 拡張は何も登録しない（worker / orchestrator / supervisor のサブプロセス、および sfh が起動した pi）
-- プロンプトのお願いではなく、ツールが物理的に存在しない状態を作る
-- sfh 委譲時も同変数を渡す（sfh は env を継承。生成する flow.yaml の `env:` にも明記する）
+- `PI_META_LOOP_DEPTH` で階層追跡
+- depth ≥ 1 では拡張は何も登録しない
+- sfh flow の `env.PI_META_LOOP_DEPTH=1` も明記
 
-## sfh 統合（実行エンジンと監視）
+## sfh 統合
 
-- **sfh は必須依存**。グループチケット（execution: sfh）の実行に使う
-- Worker は sfh を使わない。単一チケットは pi が直接実行
-- 並列・異種ツールの分岐群は runtime が sfh に直接委譲する
-- sfh を起動できるのは depth 0 の orchestrate runtime のみ
-- **統合約**: グループチケットは integration.acceptance（観測可能な完了条件）を必ず持つ。統合は fanout 後の単一ステップで行い、重複排除・矛盾列挙・出典明記を要求する
-- 生成した flow.yaml は `.pi/meta-loop/flows/` に保存（検査・再利用可能）
-- 結果回収: sfh の stdout（統合報告）+ status.json のコスト/経過時間をボードに乗せる
-- 監視（実装済み）: `.sfh/runs/<run>/status.json` を 2 秒ポーリングで読み、フッター・ウィジェット・`/sfh` に表示。手動実行した sfh も見える
-- stuck（人間介入待ち）は必ず通知
+- **必須依存**（グループチケット実行用）。native のみなら sfh なしでも orchestrate は動く
+- Worker は sfh を使わない。グループは runtime が直接委譲
+- 統合約: `integration.acceptance` 必須
+- flow は `.pi/meta-loop/flows/` に保存
+- TUI: status.json ポーリング、`/sfh`、stuck 通知
 
-## Supervision（自動 hook 駆動）
+## グループチケット検証
 
-- **初回監査は必須・早期に**（Worker 本格稼働の前）。作業設計のレビューであり、コードレビューではない
-- 2 回目以降は **Supervisor が自動で動く**（config 駆動）:
-  - 定期: `checkIntervalMinutes`（標準 30 分）
-  - 負荷: `workerStartThreshold`（標準 6 起動）
-  - 異常: 連続失敗・blocked は即時
-- 判定は Green / Yellow / Red
-  - Green: 黙る（ノイズを出さない）
-  - Yellow: **Orchestrator にプロンプト挿入**（orchestrator_guidance）。進行は止めない
-  - Red: 停止して Primary に返す
-- **介入経路は常に Supervisor → Orchestrator のみ**。Worker への直接介入は禁止。誰に何を伝えるかは Orchestrator が決める
-- 停止（red）は介入ではなく制御なので runtime が直接行ってよい
+- `execution: "sfh"` は `branches` 非空かつ `integration.acceptance` 必須
+- 満たさない場合は **blocked**（native にサイレントフォールバックしない）
 
-## Supervisor の入力（Primary の会話文脈）
+## allowed_scope の強制
 
-- orchestrate 起動時、それまでの Primary との会話（議論・合意・制約）をダイジェスト化して Supervisor と Orchestrator に渡す
-- これは「Primary を監視する」ためではなく、**動作のズレを判定する材料**として必要
-- 「普段の Primary を常時監視するモード」は作らない（過剰設計のため採用しない）
-- Worker は軽量なまま（goal + チケットのみ、会話は渡さない）
+- Worker に `scope-guard.ts` を `-e` で積む（allowed_scope または forbidden があるとき）
+- write/edit が scope 外なら tool_call で **block**
+- allowed が空なら正の制限なし（forbidden のみ）
 
-## モデル分離
+## Supervision（自動 hook）
 
-役ごとにモデルを分けられること（roles.*.model）。
-監視役と作業役が同じ癖を共有するとズレを増幅するため、分離が実力を出す鍵。
+- 初回監査は必須・早期
+- 再監査: 30分 / Worker 6 起動 / 連続失敗 2 / blocked
+- Green: 黙る / Yellow: Orchestrator に guidance / Red: 停止
+- 介入経路は Supervisor → Orchestrator のみ
+
+## Supervisor の入力
+
+- ユーザー要求 + Primary 議論ダイジェスト + ボード + 統計 + 基準
+- 「Primary 常時監視モード」は作らない
+- Worker に議論全文は渡さない
 
 ## UX
 
-- ユーザーに見える窓口は Primary 一つ
-- 内部実況（「Worker B がコンテキストを取得しました」等）は出さない
-- 表に出すのは: 分割した事実、計画の要点、認識ズレの修正、本当に必要な判断、完了物と検証結果
+- 窓口は Primary 一つ
+- フッター: `verdict:green|yellow|red`
+- 内部実況は出さない
 
 ## やらないこと
 
 1. 常時マルチエージェント化
 2. Supervisor 自身による実装
 3. 生ログ全部を毎回 Supervisor に渡すこと
-4. 最初からハーネスの自動書き換え（Meta-Harness 的進化は Phase 4 の任意枠）
+4. 最初からハーネスの自動書き換え
 5. 「Meta」命名の乱用
+6. 長期判定での強制 orchestrate（提案のみ）
 
-## 層の整理（メタ認知 / メタハーネス議論との対応）
+## 層の整理
 
 ```text
 L0 モデル内部のメタ認知        → 期待しない
 L1 実行時メタ認知ハーネス      → ★本拡張の本体
 L2 ハーネス診断 (Better 的)    → Phase 3
-L3 ハーネス進化 (Meta 的)      → Phase 4（任意・研究寄り）
+L3 ハーネス進化 (Meta 的)      → Phase 4（任意）
 ```

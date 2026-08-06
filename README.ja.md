@@ -211,8 +211,9 @@ runtime は `flow.yaml` を生成（`.pi/meta-loop/flows/` に保存）し、`PI
 - `/tasks` — タスクボード表示
 - `/verdicts` — Supervisor の判定履歴
 - `/sfh` — このプロジェクトの sfh 実行履歴を一覧・詳細表示。`/sfh stop` で最新の run を停止
-- supervised 中はフッターに薄いステータス: `supervised executing 3 tasks ●1 ✓2 review:green`
-- プロジェクトで sfh フローが動いている間は、フッターにライブ進捗（`sfh:<flow> ●running step:<id> fanout 2/3 $0.31 12m`）とエディタ上ウィジェットを表示。pi 外から手動実行した sfh も見える。stuck（人間介入待ち）は必ず通知する
+- supervised 中はフッターに薄いステータス: `supervised executing 3 tasks ●1 ✓2 verdict:green`
+- **ソフトな途中昇格**: Primary セッションで tool 回数・パス数・write 数、または長い要求文を検知すると、一度だけ `orchestrate` 検討を notify + コンテキスト注入する（強制はしない）
+- プロジェクトで sfh フローが動いている間は、フッターにライブ進捗とエディタ上ウィジェットを表示。stuck は必ず通知
 
 ユーザーに見える会話は一本。内部実況は出さず、計画・認識ズレの修正・本当に必要な判断・完了物だけを表に出す。
 
@@ -234,8 +235,8 @@ npm run typecheck    # tsc --noEmit (strict)
 - [x] Phase 1 — orchestrate ツール / 初期監査 / G-Y-R / 作業票 / 役別モデル
 - [x] Phase 2 — Supervisor 自動フック / ステップ駆動 Orchestrator / guidance 挿入 / 会話文脈 / 点検基準
 - [x] sfh TUI モニター — status.json ポーリング / フッター・ウィジェット / `/sfh` / 入れ子ガード
-- [x] Phase 2.5 — sfh 実行バックエンド：グループチケット・統合約・flow.yaml 生成・結果回収（sfh は必須依存）
-- [ ] Phase 2.75 — Worker サブプロセス内で allowed_scope を強制するガード拡張
+- [x] Phase 2.5 — sfh 実行バックエンド：グループチケット・統合約・flow.yaml 生成・結果回収
+- [x] 硬化 — ドキュメント掃除、sfh チケット検証、allowed_scope ガード、ソフト長期エスカレーション
 - [ ] Phase 3 — ハーネス診断（反復障害から rules/skills/prompts の弱点指摘）
 - [ ] Phase 4 — 進化ループ（ログとスコアの蓄積、外側 improver）— 研究寄り、任意
 

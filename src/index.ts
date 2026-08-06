@@ -17,6 +17,13 @@ import { spawnSync } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { loadConfig } from "./config.ts";
+import {
+	createEscalationStats,
+	escalationMessage,
+	noteToolCall,
+	promptLooksLong,
+	shouldSuggestEscalation,
+} from "./escalation.ts";
 import { runSupervisedTask } from "./runtime.ts";
 import { activeRuns, formatElapsed, listRuns, type SfhStatus } from "./sfh.ts";
 import type { TaskBoard, Verdict } from "./types.ts";
@@ -31,7 +38,7 @@ function boardLine(board: TaskBoard | null): string {
 	const running = board.tickets.filter((t) => t.status === "running").length;
 	const total = board.tickets.length;
 	const verdict = board.verdict?.verdict ?? "-";
-	return `supervised ${board.phase}  ${total} tasks  ●${running} ✓${done}  review:${verdict}`;
+	return `supervised ${board.phase}  ${total} tasks  ●${running} ✓${done}  verdict:${verdict}`;
 }
 
 /**
@@ -138,6 +145,50 @@ export default function (pi: ExtensionAPI) {
 
 	let currentBoard: TaskBoard | null = null;
 	let lastVerdicts: Verdict[] = [];
+	let orchestrateActive = false;
+	const escStats = createEscalationStats();
+
+	// ---------- long-task escalation (suggest orchestrate, never force) ----------
+	pi.on("tool_call", async (event, ctx) => {
+		if (orchestrateActive) return;
+		noteToolCall(escStats, event.toolName, (event.input ?? {}) as Record<string, unknown>);
+		const cfg = loadConfig(ctx.cwd);
+		if (!shouldSuggestEscalation(escStats, cfg.escalation)) return;
+		escStats.suggested = true;
+		const msg = escalationMessage(escStats);
+		if (ctx.hasUI) {
+			ctx.ui.setStatus(STATUS_KEY, "escalation: orchestrate を検討");
+			ctx.ui.notify(msg, "warning");
+		}
+	});
+
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (orchestrateActive || escStats.suggested) return;
+		const cfg = loadConfig(ctx.cwd);
+		if (!cfg.escalation.enabled) return;
+
+		const longPrompt = promptLooksLong(event.prompt ?? "", cfg.escalation.promptLengthThreshold);
+		const byStats = shouldSuggestEscalation(escStats, cfg.escalation);
+		if (!longPrompt && !byStats) return;
+
+		escStats.suggested = true;
+		const msg = byStats
+			? escalationMessage(escStats)
+			: [
+					"[pi-metaLoop] ユーザー要求が長期タスクに見える長さ/内容です。",
+					"複数成果物・複数関心にまたがる場合は `orchestrate` ツールで監督付き分業を検討してください。",
+					"単純な質問・確認・1ファイル修正なら不要です。",
+				].join("\n");
+
+		if (ctx.hasUI) ctx.ui.notify(msg, "warning");
+		return {
+			message: {
+				customType: "meta-loop-escalation",
+				content: msg,
+				display: true,
+			},
+		};
+	});
 
 	// ---------- sfh monitor ----------
 	let sfhTimer: ReturnType<typeof setInterval> | undefined;
@@ -270,6 +321,7 @@ export default function (pi: ExtensionAPI) {
 			if (params.max_tasks) config.limits.maxTasks = params.max_tasks;
 
 			ctx.ui.setStatus(STATUS_KEY, "supervised: planning...");
+			orchestrateActive = true;
 			try {
 				const result = await runSupervisedTask(
 					{ goal: params.goal, context: params.context, constraints: params.constraints, discussion: collectDiscussion(ctx) },
@@ -285,6 +337,8 @@ export default function (pi: ExtensionAPI) {
 				);
 				currentBoard = result.board;
 				lastVerdicts = result.verdicts;
+				// orchestrate took over — clear escalation nudge state
+				escStats.suggested = true;
 				ctx.ui.setStatus(STATUS_KEY, boardLine(result.board) || "supervised: done");
 				return {
 					content: [{ type: "text", text: result.summary }],
@@ -298,6 +352,8 @@ export default function (pi: ExtensionAPI) {
 					details: { error: message },
 					isError: true,
 				};
+			} finally {
+				orchestrateActive = false;
 			}
 		},
 	});

@@ -17,6 +17,8 @@ import { detectSfh, generateFlowYaml, renderBranchPrompt, renderIntegrationPromp
 import { extractJson, loadRole, runRole } from "./spawn.ts";
 import { checkAutoTriggers, evaluateTriggers, type RuntimeEvent, type SupervisorStats } from "./triggers.ts";
 import type { OrchestrateInput, TaskBoard, Ticket, Verdict } from "./types.ts";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface RuntimeHooks {
 	onPhase?: (board: TaskBoard, label: string) => void;
@@ -98,6 +100,27 @@ function pickNext(board: TaskBoard): Ticket | null {
 		if (deps.every((d) => d.status === "done" || d.status === "partial")) return t;
 	}
 	return null;
+}
+
+/** Validate ticket shape before execution. Returns error message or null. */
+export function validateTicket(ticket: Ticket): string | null {
+	if (ticket.execution === "sfh") {
+		if (!ticket.branches || ticket.branches.length === 0) {
+			return 'execution: "sfh" ですが branches が空です。並列ブランチを定義するか execution を native にしてください';
+		}
+		if (!ticket.integration?.acceptance || ticket.integration.acceptance.length === 0) {
+			return 'execution: "sfh" には integration.acceptance（統合約）が必須です';
+		}
+		for (const b of ticket.branches) {
+			if (!String(b.id || "").trim()) return "branch.id が空です";
+			if (!String(b.prompt || "").trim()) return `branch "${b.id}" の prompt が空です`;
+		}
+	}
+	return null;
+}
+
+function scopeGuardPath(): string {
+	return path.join(path.dirname(fileURLToPath(import.meta.url)), "scope-guard.ts");
 }
 
 export async function runSupervisedTask(
@@ -353,6 +376,23 @@ export async function runSupervisedTask(
 		stats.workerStarts++;
 		stats.startsSinceReview++;
 
+		const validationError = validateTicket(ticket);
+		if (validationError) {
+			ticket.status = "blocked";
+			ticket.error = validationError;
+			notify(hooks, board, `executing: ${ticket.id} 検証失敗`);
+			// treat as failure for consecutive-failure tracking
+			stats.consecutiveFailures++;
+			const trigger = evaluateTriggers(board, { kind: "worker_failed", ticket, consecutiveFailures: stats.consecutiveFailures }, config);
+			if (trigger.review) {
+				if ((await superviseIfTriggered(trigger.reason!)) === "stopped") {
+					stopped = true;
+					break;
+				}
+			}
+			continue;
+		}
+
 		const isGroup = ticket.execution === "sfh" && Array.isArray(ticket.branches) && ticket.branches.length > 0;
 		if (isGroup) {
 			notify(hooks, board, `executing: ${ticket.id}（sfh グループ・${ticket.branches!.length} ブランチ）`);
@@ -371,7 +411,20 @@ export async function runSupervisedTask(
 				`## ユーザーの要求（原文）\n${input.goal}`,
 			].join("\n");
 
-			const run = await runRole(worker, workerTask, { cwd, signal: hooks.signal, outputCap: cap });
+			const useGuard = (ticket.allowed_scope?.length ?? 0) > 0 || (ticket.forbidden?.length ?? 0) > 0;
+			const run = await runRole(worker, workerTask, {
+				cwd,
+				signal: hooks.signal,
+				outputCap: cap,
+				extraArgs: useGuard ? ["-e", scopeGuardPath()] : undefined,
+				extraEnv: useGuard
+					? {
+							PI_META_LOOP_ALLOWED_SCOPE: JSON.stringify(ticket.allowed_scope ?? []),
+							PI_META_LOOP_FORBIDDEN: JSON.stringify(ticket.forbidden ?? []),
+							PI_META_LOOP_CWD: cwd,
+						}
+					: undefined,
+			});
 			const report = extractJson<{ status?: string }>(run.output);
 
 			if (run.exitCode !== 0 && !report) {

@@ -29,6 +29,13 @@
 		"sfhIntegrateModel": "",
 		"sfhToolModels": {}
 	},
+	"escalation": {
+		"enabled": true,
+		"toolCallThreshold": 20,
+		"distinctPathThreshold": 8,
+		"writeThreshold": 5,
+		"promptLengthThreshold": 400
+	},
 	"limits": {
 		"maxTasks": 8,
 		"concurrency": 1,
