@@ -1,7 +1,7 @@
 {
 	"name": "pi-meta-loop",
-	"version": "0.1.0",
-	"description": "Adaptive supervised orchestration for pi: short tasks stay lightweight, long tasks get an Orchestrator + Supervisor + Workers with role-split models, automatic supervision hooks, and standards-based review.",
+	"version": "0.2.0-alpha",
+	"description": "Experimental adaptive supervised orchestration for pi (alpha). Short tasks stay light; long tasks get Orchestrator + Supervisor + Workers/sfh with fail-closed audit and evidence-based completion.",
 	"license": "MIT",
 	"type": "module",
 	"keywords": ["pi-package", "orchestration", "multi-agent", "metacognition", "supervision"],
@@ -22,7 +22,8 @@
 		"typescript": "^7.0.2"
 	},
 	"scripts": {
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"test": "node --experimental-strip-types --test test/**/*.test.ts"
 	},
 	"engines": {
 		"node": ">=20"

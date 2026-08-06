@@ -1,6 +1,8 @@
-# pi-metaLoop
+# pi-meta-loop
 
-[pi](https://github.com/earendil-works/pi) のための適応型監督オーケストレーション — 短いタスクは軽いままで、長いタスクだけ監督付きの分業レイヤーを立ち上げ、認識ズレを早期に止める。
+**Status: 0.2.0-alpha（実験的）。** [pi](https://github.com/earendil-works/pi) 向け適応型監督オーケストレーション。
+
+短いタスクは軽いまま。長いタスクは Orchestrator + Supervisor + Worker/sfh。**初回監査は fail-closed**、完了は **evidence ベース**、権限は **能力境界**（プロンプトだけに頼らない）。
 
 [English README](./README.md)
 

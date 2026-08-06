@@ -3,15 +3,15 @@
 	"roles": {
 		"orchestrator": {
 			"model": "",
-			"tools": ["read", "bash", "ls", "find", "grep"]
+			"tools": ["read", "ls", "find", "grep"]
 		},
 		"supervisor": {
 			"model": "",
-			"tools": ["read", "bash", "ls", "find", "grep"]
+			"tools": ["read", "ls", "find", "grep"]
 		},
 		"worker": {
 			"model": "",
-			"tools": ["read", "write", "edit", "bash", "ls", "find", "grep"]
+			"tools": ["read", "write", "edit", "ls", "find", "grep"]
 		}
 	},
 	"supervisor": {
@@ -48,5 +48,5 @@
 		"concurrency": 1,
 		"perTaskOutputCap": 51200
 	},
-	"notes": "model が空なら pi のデフォルトモデルを継承。roles.*.model = Primary 側の役別モデル。executor.sfhModel / sfhToolModels / sfhIntegrateModel = sfh 側のモデル。設定の読み込み順: 拡張デフォルト → ~/.pi/agent/meta-loop/config.json → .pi/meta-loop/config.json"
+	"notes": "0.2.0-alpha: Orchestrator/Supervisor are read-only (no bash). Worker has no bash by default. sfh groups are force read-only. Project config cannot expand capabilities past user ceiling."
 }

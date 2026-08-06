@@ -1,8 +1,12 @@
-# pi-metaLoop
+# pi-meta-loop
 
-Adaptive supervised orchestration for [pi](https://github.com/earendil-works/pi) — short tasks stay lightweight, long tasks get a supervised multi-agent layer that catches misalignment early.
+**Status: 0.2.0-alpha (experimental).** Adaptive supervised orchestration for [pi](https://github.com/earendil-works/pi).
+
+Short tasks stay lightweight. Long tasks can use a supervised layer (Orchestrator + Supervisor + Workers / sfh) with **fail-closed initial audit**, **evidence-based completion**, and **capability separation** (not prompt-only).
 
 [日本語 README](./README.ja.md)
+
+> This is not a finished “hard multi-agent OS”. Treat strong guarantees in older notes as goals; this alpha implements the critical path fixes (sfh success path, supervisor payload, fail-closed audit, scope+git evidence, no bash on orch/sup by default).
 
 ## The idea
 
@@ -237,11 +241,16 @@ npm install
 npm run typecheck    # tsc --noEmit (strict)
 ```
 
-## Security
+## Security (alpha)
 
-This extension spawns `pi` subprocesses with your full permissions. Agent prompts come from this repository only (no project-local agent loading). Review the code before installing, as with any pi package.
+- Orchestrator / Supervisor default tools are **read-only** (no bash).
+- Worker default tools are read/write/edit without bash; `allowed_scope` is enforced on write/edit **and** checked after run via `git` dirty files when possible.
+- sfh parallel groups are **forced read-only** (`access: read`).
+- Project config may only **narrow** capabilities relative to user/defaults (cannot raise sfh access, swap sfhBinary, or expand tool allow-lists past the user ceiling).
+- Project `standards.md` is treated as **untrusted criteria data** in prompts.
+- Generated flows under `.pi/meta-loop/flows/` may contain user text — gitignore them; do not commit secrets.
 
-**Nesting guard:** spawned subprocesses set `PI_META_LOOP_DEPTH >= 1`, which makes this extension register nothing — workers, role subprocesses, and pi instances launched by sfh can never re-orchestrate or re-delegate. Recursion is structurally impossible.
+**Nesting guard:** child processes set `PI_META_LOOP_DEPTH >= 1` so this extension registers nothing on the normal path. This prevents accidental re-orchestration; it is **not** a hostile security boundary if a process can clear env and spawn arbitrary binaries (Worker has no bash by default).
 
 ## Roadmap
 

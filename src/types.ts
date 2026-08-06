@@ -1,27 +1,57 @@
 /**
- * pi-metaLoop core types: task tickets, verdicts, board.
+ * pi-metaLoop core types.
  */
+export type TicketStatus =
+	| "pending"
+	| "running"
+	| "done"
+	| "partial"
+	| "blocked"
+	| "failed"
+	| "cancelled";
 
-export type TicketStatus = "pending" | "running" | "done" | "partial" | "blocked" | "failed";
+export type BoardPhase =
+	| "planning"
+	| "initial-review"
+	| "revision"
+	| "executing"
+	| "final-review"
+	| "done"
+	| "stopped"
+	| "incomplete"
+	| "degraded";
 
-/** 並列グループチケットの 1 ブランチ */
+/** Parallel group branch */
 export interface Branch {
 	id: string;
-	/** sfh のツールプリセット名（pi / opencode / codex / claude / grok など）。既定は pi */
 	tool?: string;
-	/** sfh step.model。未指定なら config の executor.sfhToolModels / sfhModel */
 	model?: string;
-	/** sfh step.effort（low/medium/high 等。ツール依存） */
 	effort?: string;
-	/** sfh step.access: read | write | full */
+	/** Forced to read for sfh groups by the harness */
 	access?: string;
 	prompt: string;
 }
 
-/** 統合約：並列ブランチの出力をどう纏めるかの観測可能な条件 */
 export interface IntegrationContract {
 	acceptance: string[];
 	output?: string;
+}
+
+export interface WorkerClaim {
+	claimedStatus?: "done" | "partial" | "blocked";
+	changed_files?: string[];
+	tests?: string[];
+	unresolved?: string[];
+	assumptions?: string[];
+	notes?: string;
+	raw?: string;
+}
+
+export interface ExecutionEvidence {
+	processExitCode: number;
+	actualChangedFiles: string[];
+	scopeViolations: string[];
+	claimedStatus?: string;
 }
 
 export interface Ticket {
@@ -33,20 +63,20 @@ export interface Ticket {
 	forbidden: string[];
 	dependencies: string[];
 	context?: string;
-	/** native = Worker（pi）が直接実行。sfh = 並列ブランチ群を sfh に委譲 */
 	execution?: "native" | "sfh";
 	branches?: Branch[];
 	integration?: IntegrationContract;
 	status: TicketStatus;
 	report?: string;
 	error?: string;
+	claim?: WorkerClaim;
+	evidence?: ExecutionEvidence;
 }
 
 export type VerdictLevel = "green" | "yellow" | "red";
 
 export interface Verdict {
 	verdict: VerdictLevel;
-	/** macro | meso | micro のどの層への介入か */
 	scope?: "overall" | "orchestrator" | "workers" | "harness";
 	observations: string[];
 	risk: string[];
@@ -54,8 +84,6 @@ export interface Verdict {
 	optional_advice: string[];
 	affected_tasks: string[];
 	harness_suggestions: string[];
-	/** Orchestrator の次のステップに注入する行動改善アドバイス（例: 視野狭窄の是正）。
-	 * Worker への直接介入は禁止。すべて Orchestrator 経由。 */
 	orchestrator_guidance?: string[];
 }
 
@@ -64,7 +92,7 @@ export interface TaskBoard {
 	planSummary: string;
 	openQuestions: string[];
 	tickets: Ticket[];
-	phase: "planning" | "initial-review" | "revision" | "executing" | "final-review" | "done" | "stopped";
+	phase: BoardPhase;
 	verdict?: Verdict;
 	reviewCount: number;
 }
@@ -73,7 +101,6 @@ export interface OrchestrateInput {
 	goal: string;
 	context?: string;
 	constraints?: string;
-	/** orchestrate 起動前までの Primary との会話ダイジェスト（議論・合意・制約） */
 	discussion?: string;
 	max_tasks?: number;
 }

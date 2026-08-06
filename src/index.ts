@@ -1,17 +1,5 @@
 /**
- * pi-metaLoop extension entry.
- *
- * Primary stays the user's single point of contact. Short tasks are handled
- * normally. For long tasks the primary calls the `orchestrate` tool, which
- * runs plan -> supervision -> workers -> automatic re-checks in isolated pi
- * subprocesses.
- *
- * Also monitors sfh (SimpleFlowHarness) runs in the current project and
- * surfaces their status in the TUI (footer + widget + /sfh).
- *
- * Nesting guard: when PI_META_LOOP_DEPTH >= 1 (we are inside a spawned role
- * subprocess, or a pi process launched by sfh), this extension registers
- * nothing — no orchestrate, no sfh delegation. Recursion is impossible.
+ * pi-meta-loop extension entry (0.2.0-alpha).
  */
 import { spawnSync } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -25,7 +13,7 @@ import {
 	shouldSuggestEscalation,
 } from "./escalation.ts";
 import { runSupervisedTask } from "./runtime.ts";
-import { activeRuns, formatElapsed, listRuns, type SfhStatus } from "./sfh.ts";
+import { activeRuns, formatElapsed, listRuns, readStatus, type SfhStatus } from "./sfh.ts";
 import type { TaskBoard, Verdict } from "./types.ts";
 
 const STATUS_KEY = "meta-loop";
@@ -41,10 +29,6 @@ function boardLine(board: TaskBoard | null): string {
 	return `supervised ${board.phase}  ${total} tasks  ●${running} ✓${done}  verdict:${verdict}`;
 }
 
-/**
- * Digest of the Primary conversation so far. Input material for the
- * Supervisor and Orchestrator to judge alignment. Not passed to Workers.
- */
 function collectDiscussion(ctx: ExtensionContext): string {
 	try {
 		const entries = ctx.sessionManager.getBranch();
@@ -68,8 +52,6 @@ function collectDiscussion(ctx: ExtensionContext): string {
 		return "";
 	}
 }
-
-// ---------- sfh status rendering ----------
 
 function stateColor(state: string): "accent" | "success" | "error" | "warning" | "muted" {
 	switch (state) {
@@ -132,14 +114,11 @@ function sfhWidgetLines(s: SfhStatus, theme: Theme): string[] {
 		lines.push(theme.fg("dim", members.slice(0, 6).map(([name, st]) => `${name}:${st}`).join("  ")));
 	}
 	if (s.error) lines.push(theme.fg("error", s.error.slice(0, 120)));
-	if (s.state === "stuck") lines.push(theme.fg("warning", "stuck: 人間の介入待ち（sfh stop / 直接対応）"));
+	if (s.state === "stuck") lines.push(theme.fg("warning", "stuck: human intervention required (/sfh stop)"));
 	return lines;
 }
 
-// ---------- extension ----------
-
 export default function (pi: ExtensionAPI) {
-	// Nesting guard: subprocesses never re-orchestrate.
 	const depth = Number.parseInt(process.env.PI_META_LOOP_DEPTH ?? "0", 10) || 0;
 	if (depth >= 1) return;
 
@@ -148,51 +127,46 @@ export default function (pi: ExtensionAPI) {
 	let orchestrateActive = false;
 	const escStats = createEscalationStats();
 
-	// ---------- long-task escalation (suggest orchestrate, never force) ----------
+	// ---------- soft escalation ----------
 	pi.on("tool_call", async (event, ctx) => {
-		if (orchestrateActive) return;
-		noteToolCall(escStats, event.toolName, (event.input ?? {}) as Record<string, unknown>);
 		const cfg = loadConfig(ctx.cwd);
+		if (!cfg.enabled || orchestrateActive) return;
+		noteToolCall(escStats, event.toolName, (event.input ?? {}) as Record<string, unknown>);
 		if (!shouldSuggestEscalation(escStats, cfg.escalation)) return;
 		escStats.suggested = true;
 		const msg = escalationMessage(escStats);
 		if (ctx.hasUI) {
-			ctx.ui.setStatus(STATUS_KEY, "escalation: orchestrate を検討");
+			ctx.ui.setStatus(STATUS_KEY, "escalation: consider orchestrate");
 			ctx.ui.notify(msg, "warning");
 		}
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (orchestrateActive || escStats.suggested) return;
 		const cfg = loadConfig(ctx.cwd);
+		if (!cfg.enabled || orchestrateActive || escStats.suggested) return;
 		if (!cfg.escalation.enabled) return;
-
 		const longPrompt = promptLooksLong(event.prompt ?? "", cfg.escalation.promptLengthThreshold);
 		const byStats = shouldSuggestEscalation(escStats, cfg.escalation);
 		if (!longPrompt && !byStats) return;
-
 		escStats.suggested = true;
 		const msg = byStats
 			? escalationMessage(escStats)
 			: [
-					"[pi-metaLoop] ユーザー要求が長期タスクに見える長さ/内容です。",
-					"複数成果物・複数関心にまたがる場合は `orchestrate` ツールで監督付き分業を検討してください。",
-					"単純な質問・確認・1ファイル修正なら不要です。",
+					"[pi-meta-loop] This request looks like a long task.",
+					"If it spans multiple deliverables/modules, consider the `orchestrate` tool.",
+					"Skip for simple Q&A or single-file fixes.",
 				].join("\n");
-
 		if (ctx.hasUI) ctx.ui.notify(msg, "warning");
 		return {
-			message: {
-				customType: "meta-loop-escalation",
-				content: msg,
-				display: true,
-			},
+			message: { customType: "meta-loop-escalation", content: msg, display: true },
 		};
 	});
 
 	// ---------- sfh monitor ----------
 	let sfhTimer: ReturnType<typeof setInterval> | undefined;
 	const sfhLastStates = new Map<string, string>();
+	/** Remember last watched run dirs so we can notify on done/failed after they leave activeRuns */
+	const watchedRuns = new Map<string, string>(); // runDir -> lastState
 
 	const stopSfhPoller = () => {
 		if (sfhTimer) {
@@ -202,39 +176,47 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (_event, ctx) => {
-		if (!ctx.hasUI) return;
+		const cfg = loadConfig(ctx.cwd);
+		if (!cfg.enabled || !ctx.hasUI) return;
 		stopSfhPoller();
 		sfhLastStates.clear();
+		watchedRuns.clear();
 		sfhTimer = setInterval(() => {
 			try {
 				const theme = ctx.ui.theme;
-				const runs = activeRuns(ctx.cwd);
-				if (runs.length === 0) {
-					if (sfhLastStates.size > 0) {
-						sfhLastStates.clear();
-						ctx.ui.setStatus(SFH_KEY, "");
-						ctx.ui.setWidget(SFH_KEY, []);
+				// Update watched set from active + previously watched
+				const actives = activeRuns(ctx.cwd);
+				for (const r of actives) watchedRuns.set(r.runDir, r.status?.state ?? "running");
+
+				// Re-read all watched for terminal transitions
+				for (const runDir of [...watchedRuns.keys()]) {
+					const s = readStatus(runDir);
+					if (!s) continue;
+					const prev = sfhLastStates.get(runDir);
+					if (prev && prev !== s.state) {
+						const severity = s.state === "done" ? "info" : s.state === "stuck" ? "warning" : "error";
+						ctx.ui.notify(`sfh:${s.flow} → ${s.state}`, severity);
 					}
+					if (!prev && s.state === "stuck") {
+						ctx.ui.notify(`sfh:${s.flow} is stuck (human intervention)`, "warning");
+					}
+					sfhLastStates.set(runDir, s.state);
+					if (s.state !== "running" && s.state !== "stuck") {
+						// terminal — drop after notify
+						watchedRuns.delete(runDir);
+					}
+				}
+
+				const running = actives[0]?.status;
+				if (!running) {
+					ctx.ui.setStatus(SFH_KEY, "");
+					ctx.ui.setWidget(SFH_KEY, []);
 					return;
 				}
-				const run = runs[0];
-				const s = run.status;
-				if (!s) return;
-
-				const prev = sfhLastStates.get(run.runDir);
-				if (prev && prev !== s.state) {
-					const severity = s.state === "done" ? "info" : s.state === "stuck" ? "warning" : "error";
-					ctx.ui.notify(`sfh:${s.flow} → ${s.state}`, severity);
-				}
-				if (!prev && s.state === "stuck") {
-					ctx.ui.notify(`sfh:${s.flow} が stuck（人間の介入待ち）です`, "warning");
-				}
-				sfhLastStates.set(run.runDir, s.state);
-
-				ctx.ui.setStatus(SFH_KEY, sfhFooter(s, theme));
-				ctx.ui.setWidget(SFH_KEY, sfhWidgetLines(s, theme));
-			} catch {
-				// Never let the poller crash the session.
+				ctx.ui.setStatus(SFH_KEY, sfhFooter(running, theme));
+				ctx.ui.setWidget(SFH_KEY, sfhWidgetLines(running, theme));
+			} catch (err) {
+				console.error("[pi-meta-loop] sfh poller error", err);
 			}
 		}, SFH_POLL_MS);
 	});
@@ -244,87 +226,95 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("sfh", {
-		description: "sfh の実行状況を表示（/sfh stop で最新 run を停止）",
+		description: "Show sfh run status (/sfh stop stops newest run)",
 		handler: async (args, ctx) => {
+			const cfg = loadConfig(ctx.cwd);
+			if (!cfg.enabled) {
+				ctx.ui.notify("pi-meta-loop is disabled", "info");
+				return;
+			}
 			if (args.trim() === "stop") {
 				try {
-					const r = spawnSync("sfh", ["stop"], { cwd: ctx.cwd, timeout: 30_000 });
+					const bin = cfg.executor.sfhBinary || "sfh";
+					const r = spawnSync(bin, ["stop"], { cwd: ctx.cwd, timeout: 30_000 });
 					const out = `${r.stdout?.toString() ?? ""}${r.stderr?.toString() ?? ""}`.trim();
 					ctx.ui.notify(out ? out.slice(0, 300) : `sfh stop: exit ${r.status}`, r.status === 0 ? "info" : "error");
 				} catch {
-					ctx.ui.notify("sfh stop に失敗（sfh はインストールされていますか？）", "error");
+					ctx.ui.notify("sfh stop failed (is sfh installed?)", "error");
 				}
 				return;
 			}
-
 			const runs = listRuns(ctx.cwd, 10);
 			if (runs.length === 0) {
-				ctx.ui.notify("このプロジェクトに .sfh/runs の記録はありません", "info");
+				ctx.ui.notify("No .sfh/runs records in this project", "info");
 				return;
 			}
 			const items = runs.map((r) => {
 				const s = r.status;
-				const core = s ? `${s.state}  ${s.flow}  step:${s.current_step}  $${(s.cost_usd ?? 0).toFixed(2)}  ${formatElapsed(s.elapsed_sec)}` : "(no status.json)";
+				const core = s
+					? `${s.state}  ${s.flow}  step:${s.current_step}  $${(s.cost_usd ?? 0).toFixed(2)}  ${formatElapsed(s.elapsed_sec)}`
+					: "(no status.json)";
 				return `${r.id}  ${core}`;
 			});
-			const choice = await ctx.ui.select("sfh run を選択:", items);
+			const choice = await ctx.ui.select("Select sfh run:", items);
 			if (!choice) return;
 			const picked = runs[items.indexOf(choice)];
 			const s = picked?.status;
 			if (!s) {
-				ctx.ui.notify(`${picked?.id}: status.json が読めません`, "warning");
+				ctx.ui.notify(`${picked?.id}: cannot read status.json`, "warning");
 				return;
 			}
-			const details = [
-				`run: ${picked.id}`,
-				`flow: ${s.flow}   state: ${s.state}`,
-				`current_step: ${s.current_step}   steps_done: ${s.steps_done}`,
-				`cost: $${(s.cost_usd ?? 0).toFixed(2)}   elapsed: ${formatElapsed(s.elapsed_sec)}`,
-				s.fanout_total > 0 ? `fanout: ${s.fanout_completed}/${s.fanout_total}` : "",
-				Object.keys(s.active_members ?? {}).length > 0 ? `members: ${JSON.stringify(s.active_members)}` : "",
-				s.error ? `error: ${s.error}` : "",
-				`dir: ${s.run_dir ?? picked.runDir}`,
-				"",
-				"停止は /sfh stop（最新の run が対象）",
-			].filter(Boolean);
-			ctx.ui.notify(details.join("\n"), s.state === "stuck" ? "warning" : "info");
+			ctx.ui.notify(
+				[
+					`run: ${picked.id}`,
+					`flow: ${s.flow}   state: ${s.state}`,
+					`step: ${s.current_step}   steps_done: ${s.steps_done}`,
+					`cost: $${(s.cost_usd ?? 0).toFixed(2)}   elapsed: ${formatElapsed(s.elapsed_sec)}`,
+					s.error ? `error: ${s.error}` : "",
+					`dir: ${s.run_dir ?? picked.runDir}`,
+					"",
+					"Stop newest: /sfh stop",
+				]
+					.filter(Boolean)
+					.join("\n"),
+				s.state === "stuck" ? "warning" : "info",
+			);
 		},
 	});
-
-	// ---------- orchestrate ----------
 
 	pi.registerTool({
 		name: "orchestrate",
 		label: "Supervised Task",
 		description: [
-			"長期・大規模タスク専用の監督付き実行。",
-			"Orchestrator が作業票に分解し、Supervisor が初期監査（green/yellow/red）と自動再監査を行い、",
-			"Worker が限定スコープで実装する。役ごとにモデルを分けられる。",
-			"短いタスク・質問・git確認・議論には使わないこと。自分が直接処理すること。",
-			"使用するのは: 複数ファイル/複数関心にまたがる実装、設計判断を伴う改修、",
-			"成果物が複数ある作業、ユーザーが明示的に分業を求めた場合。",
+			"Long-running / multi-deliverable tasks only.",
+			"Orchestrator decomposes into tickets; Supervisor audits (fail-closed); Workers or sfh groups execute.",
+			"Do NOT use for short Q&A, git status, or single-file fixes.",
 		].join("\n"),
 		parameters: Type.Object({
-			goal: Type.String({ description: "ユーザーの要求。原文をそのまま渡す" }),
-			context: Type.Optional(Type.String({ description: "補足コンテキスト（関連ファイル、決定事項）" })),
-			constraints: Type.Optional(Type.String({ description: "制約・禁止事項（forbidden）" })),
-			max_tasks: Type.Optional(Type.Number({ description: "チケット上限（デフォルトは config）" })),
+			goal: Type.String({ description: "User request, verbatim" }),
+			context: Type.Optional(Type.String({ description: "Extra context" })),
+			constraints: Type.Optional(Type.String({ description: "Constraints / forbidden" })),
+			max_tasks: Type.Optional(Type.Number({ description: "Ticket cap" })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const config = loadConfig(ctx.cwd);
 			if (!config.enabled) {
 				return {
-					content: [{ type: "text", text: "pi-metaLoop は無効化されています (config/meta-loop.json の enabled: false)。通常どおり自分で処理してください。" }],
+					content: [{ type: "text", text: "pi-meta-loop is disabled (enabled: false). Handle the task yourself." }],
 					details: {},
 				};
 			}
 			if (params.max_tasks) config.limits.maxTasks = params.max_tasks;
-
 			ctx.ui.setStatus(STATUS_KEY, "supervised: planning...");
 			orchestrateActive = true;
 			try {
 				const result = await runSupervisedTask(
-					{ goal: params.goal, context: params.context, constraints: params.constraints, discussion: collectDiscussion(ctx) },
+					{
+						goal: params.goal,
+						context: params.context,
+						constraints: params.constraints,
+						discussion: collectDiscussion(ctx),
+					},
 					ctx.cwd,
 					config,
 					{
@@ -337,7 +327,6 @@ export default function (pi: ExtensionAPI) {
 				);
 				currentBoard = result.board;
 				lastVerdicts = result.verdicts;
-				// orchestrate took over — clear escalation nudge state
 				escStats.suggested = true;
 				ctx.ui.setStatus(STATUS_KEY, boardLine(result.board) || "supervised: done");
 				return {
@@ -348,7 +337,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.setStatus(STATUS_KEY, "supervised: error");
 				const message = err instanceof Error ? err.message : String(err);
 				return {
-					content: [{ type: "text", text: `orchestrate の実行に失敗しました: ${message}` }],
+					content: [{ type: "text", text: `orchestrate failed: ${message}` }],
 					details: { error: message },
 					isError: true,
 				};
@@ -359,10 +348,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("tasks", {
-		description: "現在の supervised task ボードを表示",
+		description: "Show supervised task board",
 		handler: async (_args, ctx) => {
+			if (!loadConfig(ctx.cwd).enabled) {
+				ctx.ui.notify("pi-meta-loop is disabled", "info");
+				return;
+			}
 			if (!currentBoard) {
-				ctx.ui.notify("実行中の supervised task はありません", "info");
+				ctx.ui.notify("No active supervised task", "info");
 				return;
 			}
 			const lines = [
@@ -373,28 +366,26 @@ export default function (pi: ExtensionAPI) {
 					(t) => `[${t.status}] ${t.id} — ${t.goal}${t.error ? `  (${t.error.slice(0, 80)})` : ""}`,
 				),
 			];
-			if (currentBoard.verdict) {
-				lines.push("", `最新 verdict: ${currentBoard.verdict.verdict}`);
-				if (currentBoard.verdict.required_actions.length > 0) {
-					lines.push(`required: ${currentBoard.verdict.required_actions.join(" / ")}`);
-				}
-			}
+			if (currentBoard.verdict) lines.push("", `verdict: ${currentBoard.verdict.verdict}`);
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});
 
 	pi.registerCommand("verdicts", {
-		description: "Supervisor の判定履歴を表示",
+		description: "Show Supervisor verdict history",
 		handler: async (_args, ctx) => {
-			if (lastVerdicts.length === 0) {
-				ctx.ui.notify("まだ判定はありません", "info");
+			if (!loadConfig(ctx.cwd).enabled) {
+				ctx.ui.notify("pi-meta-loop is disabled", "info");
 				return;
 			}
-			const lines = lastVerdicts.map((v, i) => {
-				const obs = v.observations.length > 0 ? ` — ${v.observations[0]}` : "";
-				return `#${i + 1} ${v.verdict}${obs}`;
-			});
-			ctx.ui.notify(lines.join("\n"), "info");
+			if (lastVerdicts.length === 0) {
+				ctx.ui.notify("No verdicts yet", "info");
+				return;
+			}
+			ctx.ui.notify(
+				lastVerdicts.map((v, i) => `#${i + 1} ${v.verdict}${v.observations[0] ? ` — ${v.observations[0]}` : ""}`).join("\n"),
+				"info",
+			);
 		},
 	});
 }

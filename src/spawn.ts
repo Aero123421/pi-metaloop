@@ -1,6 +1,5 @@
 /**
- * Spawns isolated `pi` subprocesses (JSON mode) for each role, like the
- * official subagent extension. Agent system prompts live in ../agents/*.md.
+ * Spawns isolated `pi` subprocesses (JSON mode) for each role.
  */
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -41,12 +40,13 @@ export function loadRole(name: RoleName, roleConfig: RoleConfig): LoadedRole {
 			.map((t) => t.trim())
 			.filter(Boolean);
 	} catch {
-		// Agent prompt missing: run with defaults, identity carried by the task text.
+		/* missing agent file */
 	}
 	return {
 		name,
 		systemPrompt,
 		model: roleConfig.model || fmModel,
+		// Config tools win; never silently expand beyond config when set
 		tools: roleConfig.tools ?? fmTools,
 	};
 }
@@ -62,7 +62,6 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	if (!isGenericRuntime) {
 		return { command: process.execPath, args };
 	}
-	// Fallback: assume `pi` is on PATH.
 	return { command: "pi", args };
 }
 
@@ -79,6 +78,18 @@ function getFinalText(messages: Message[]): string {
 	return "";
 }
 
+async function writePromptToTempFile(role: string, systemPrompt: string): Promise<string> {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-meta-loop-${role}-`));
+	const filePath = path.join(dir, "prompt.md");
+	fs.writeFileSync(filePath, systemPrompt, { encoding: "utf-8", mode: 0o600 });
+	try {
+		fs.chmodSync(filePath, 0o600);
+	} catch {
+		/* windows */
+	}
+	return filePath;
+}
+
 export async function runRole(
 	role: LoadedRole,
 	task: string,
@@ -87,9 +98,7 @@ export async function runRole(
 		signal?: AbortSignal;
 		outputCap?: number;
 		onProgress?: (text: string) => void;
-		/** extra CLI args (e.g. -e scope-guard.ts) */
 		extraArgs?: string[];
-		/** extra env vars for the child process */
 		extraEnv?: Record<string, string>;
 	},
 ): Promise<RoleRunResult> {
@@ -99,95 +108,126 @@ export async function runRole(
 	if (opts.extraArgs?.length) args.push(...opts.extraArgs);
 
 	const promptPath = await writePromptToTempFile(role.name, role.systemPrompt);
-
 	const usage: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 	const messages: Message[] = [];
 	let stderr = "";
+	const STDERR_CAP = 200_000;
 
-	const result = await new Promise<RoleRunResult>((resolve) => {
-		const invocation = getPiInvocation([...args, "--append-system-prompt", promptPath, `Task: ${task}`]);
-		// Nesting guard: subprocess roles (and anything they spawn) must never
-		// re-register the orchestration extension.
-		const depth = Number.parseInt(process.env.PI_META_LOOP_DEPTH ?? "0", 10) || 0;
-		const proc = spawn(invocation.command, invocation.args, {
-			cwd: opts.cwd,
-			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
-			env: {
-				...process.env,
-				PI_META_LOOP_DEPTH: String(depth + 1),
-				...(opts.extraEnv ?? {}),
-			},
-		});
-
-		let buffer = "";
-		const processLine = (line: string) => {
-			if (!line.trim()) return;
-			try {
-				const event = JSON.parse(line);
-				if (event.type === "message_end" && event.message) {
-					const msg = event.message as Message;
-					messages.push(msg);
-					if (msg.role === "assistant") {
-						usage.turns++;
-						const u: any = (msg as any).usage;
-						if (u) {
-							usage.input += u.input ?? 0;
-							usage.output += u.output ?? 0;
-							usage.cacheRead += u.cacheRead ?? 0;
-							usage.cacheWrite += u.cacheWrite ?? 0;
-							usage.cost += u.cost?.total ?? u.cost ?? 0;
-						}
-						opts.onProgress?.(getFinalText(messages).slice(-400));
-					}
-				}
-			} catch {
-				// Ignore non-JSON lines.
-			}
-		};
-
-		proc.stdout.on("data", (chunk: Buffer) => {
-			buffer += chunk.toString("utf-8");
-			const lines = buffer.split("\n");
-			buffer = lines.pop() ?? "";
-			for (const line of lines) processLine(line);
-		});
-		proc.stderr.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString("utf-8");
-		});
-
-		const onAbort = () => {
-			try {
-				proc.kill("SIGTERM");
-			} catch {}
-		};
-		opts.signal?.addEventListener("abort", onAbort);
-
-		proc.on("close", (code) => {
-			opts.signal?.removeEventListener("abort", onAbort);
-			if (buffer.trim()) processLine(buffer);
-			let output = getFinalText(messages);
-			const cap = opts.outputCap ?? 51200;
-			if (output.length > cap) output = output.slice(0, cap) + "\n...[truncated]";
-			resolve({ output: output || (stderr ? `[exit ${code}] ${stderr.slice(0, 2000)}` : ""), exitCode: code ?? 0, usage });
-		});
-	});
+	// Prefer task via stdin-less argv but keep moderate length; truncate extreme tasks
+	const taskArg = task.length > 100_000 ? task.slice(0, 100_000) + "\n...[task truncated]" : task;
 
 	try {
-		fs.rmSync(path.dirname(promptPath), { recursive: true, force: true });
-	} catch {}
+		const result = await new Promise<RoleRunResult>((resolve) => {
+			const depth = Number.parseInt(process.env.PI_META_LOOP_DEPTH ?? "0", 10) || 0;
+			// Depth must not be overridden by extraEnv
+			const childEnv = {
+				...process.env,
+				...(opts.extraEnv ?? {}),
+				PI_META_LOOP_DEPTH: String(depth + 1),
+			};
+			const invocation = getPiInvocation([...args, "--append-system-prompt", promptPath, `Task: ${taskArg}`]);
+			const proc = spawn(invocation.command, invocation.args, {
+				cwd: opts.cwd,
+				shell: false,
+				stdio: ["ignore", "pipe", "pipe"],
+				env: childEnv,
+			});
 
-	return result;
+			let buffer = "";
+			let settled = false;
+			const finish = (exitCode: number) => {
+				if (settled) return;
+				settled = true;
+				if (buffer.trim()) processLine(buffer);
+				let output = getFinalText(messages);
+				const cap = opts.outputCap ?? 51200;
+				if (output.length > cap) output = output.slice(0, cap) + "\n...[truncated]";
+				const code = exitCode;
+				resolve({
+					output: output || (stderr ? `[exit ${code}] ${stderr.slice(0, 2000)}` : ""),
+					exitCode: code,
+					usage,
+				});
+			};
+
+			const processLine = (line: string) => {
+				if (!line.trim()) return;
+				try {
+					const event = JSON.parse(line);
+					if (event.type === "message_end" && event.message) {
+						const msg = event.message as Message;
+						messages.push(msg);
+						if (msg.role === "assistant") {
+							usage.turns++;
+							const u: any = (msg as any).usage;
+							if (u) {
+								usage.input += u.input ?? 0;
+								usage.output += u.output ?? 0;
+								usage.cacheRead += u.cacheRead ?? 0;
+								usage.cacheWrite += u.cacheWrite ?? 0;
+								usage.cost += u.cost?.total ?? u.cost ?? 0;
+							}
+							opts.onProgress?.(getFinalText(messages).slice(-400));
+						}
+					}
+				} catch {
+					/* ignore */
+				}
+			};
+
+			proc.stdout.on("data", (chunk: Buffer) => {
+				buffer += chunk.toString("utf-8");
+				if (buffer.length > 5_000_000) buffer = buffer.slice(-2_000_000);
+				const lines = buffer.split("\n");
+				buffer = lines.pop() ?? "";
+				for (const line of lines) processLine(line);
+			});
+			proc.stderr.on("data", (chunk: Buffer) => {
+				stderr += chunk.toString("utf-8");
+				if (stderr.length > STDERR_CAP) stderr = stderr.slice(-STDERR_CAP);
+			});
+
+			let killTimer: ReturnType<typeof setTimeout> | undefined;
+			const onAbort = () => {
+				try {
+					proc.kill("SIGTERM");
+				} catch {
+					/* */
+				}
+				killTimer = setTimeout(() => {
+					try {
+						proc.kill("SIGKILL");
+					} catch {
+						/* */
+					}
+				}, 3000);
+			};
+			opts.signal?.addEventListener("abort", onAbort);
+
+			proc.on("error", (err) => {
+				opts.signal?.removeEventListener("abort", onAbort);
+				if (killTimer) clearTimeout(killTimer);
+				stderr += `\n${err.message}`;
+				finish(1);
+			});
+			proc.on("close", (code, signal) => {
+				opts.signal?.removeEventListener("abort", onAbort);
+				if (killTimer) clearTimeout(killTimer);
+				// signal termination is not success
+				if (code === null && signal) finish(1);
+				else finish(code ?? 1);
+			});
+		});
+		return result;
+	} finally {
+		try {
+			fs.rmSync(path.dirname(promptPath), { recursive: true, force: true });
+		} catch {
+			/* */
+		}
+	}
 }
 
-async function writePromptToTempFile(role: string, systemPrompt: string): Promise<string> {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-meta-loop-${role}-`));
-	const filePath = path.join(dir, "prompt.md");
-	fs.writeFileSync(filePath, systemPrompt, "utf-8");
-	return filePath;
-}
-
-/** Extract the first fenced ```json block (or the first {...} blob) and parse it. */
 export function extractJson<T = unknown>(text: string): T | null {
 	const fence = text.match(/```json\s*([\s\S]*?)```/i) ?? text.match(/```\s*([\s\S]*?)```/);
 	let candidate = fence?.[1];

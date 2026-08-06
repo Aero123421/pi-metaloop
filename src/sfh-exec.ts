@@ -204,6 +204,8 @@ export function runSfhFlow(opts: {
 	flowName: string;
 	cwd: string;
 	signal?: AbortSignal;
+	/** Hard wall clock for the whole sfh process (seconds) */
+	wallClockSec?: number;
 	onProgress?: (chunk: string) => void;
 }): Promise<SfhRunResult> {
 	return new Promise((resolve) => {
@@ -216,37 +218,67 @@ export function runSfhFlow(opts: {
 		});
 		let stdout = "";
 		let stderr = "";
-		proc.stdout.on("data", (c: Buffer) => {
-			stdout += c.toString("utf-8");
-		});
-		proc.stderr.on("data", (c: Buffer) => {
-			const text = c.toString("utf-8");
-			stderr += text;
-			opts.onProgress?.(text.slice(-300));
-		});
-		const onAbort = () => {
-			try {
-				proc.kill("SIGTERM");
-			} catch {
-				// already gone
-			}
-		};
-		opts.signal?.addEventListener("abort", onAbort);
-		proc.on("close", (code) => {
-			opts.signal?.removeEventListener("abort", onAbort);
+		let settled = false;
+		const finish = (exitCode: number) => {
+			if (settled) return;
+			settled = true;
 			const run = findRunDirForFlow(opts.cwd, opts.flowName);
 			resolve({
-				exitCode: code ?? 1,
+				exitCode,
 				stdout,
 				stderr,
 				runDir: run?.runDir,
 				costUsd: run?.costUsd,
 				elapsedSec: run?.elapsedSec,
 			});
+		};
+		proc.stdout.on("data", (c: Buffer) => {
+			stdout += c.toString("utf-8");
+			if (stdout.length > 2_000_000) stdout = stdout.slice(-1_000_000);
+		});
+		proc.stderr.on("data", (c: Buffer) => {
+			const text = c.toString("utf-8");
+			stderr += text;
+			if (stderr.length > 500_000) stderr = stderr.slice(-250_000);
+			opts.onProgress?.(text.slice(-300));
+		});
+		let killTimer: ReturnType<typeof setTimeout> | undefined;
+		let wallTimer: ReturnType<typeof setTimeout> | undefined;
+		const killSoft = () => {
+			try {
+				proc.kill("SIGTERM");
+			} catch {
+				/* */
+			}
+			killTimer = setTimeout(() => {
+				try {
+					proc.kill("SIGKILL");
+				} catch {
+					/* */
+				}
+			}, 3000);
+		};
+		const onAbort = () => killSoft();
+		opts.signal?.addEventListener("abort", onAbort);
+		if (opts.wallClockSec && opts.wallClockSec > 0) {
+			wallTimer = setTimeout(() => {
+				stderr += `\n[pi-meta-loop] sfh wall clock exceeded (${opts.wallClockSec}s)\n`;
+				killSoft();
+			}, opts.wallClockSec * 1000);
+		}
+		proc.on("close", (code, signal) => {
+			opts.signal?.removeEventListener("abort", onAbort);
+			if (killTimer) clearTimeout(killTimer);
+			if (wallTimer) clearTimeout(wallTimer);
+			if (code === null && signal) finish(1);
+			else finish(code ?? 1);
 		});
 		proc.on("error", (err) => {
 			opts.signal?.removeEventListener("abort", onAbort);
-			resolve({ exitCode: 1, stdout, stderr: `${stderr}\n${err.message}` });
+			if (killTimer) clearTimeout(killTimer);
+			if (wallTimer) clearTimeout(wallTimer);
+			stderr += `\n${err.message}`;
+			finish(1);
 		});
 	});
 }
