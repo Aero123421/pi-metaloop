@@ -79,7 +79,7 @@ Supervisor は基準を判定根拠にする。**基準にない事項は option
 pi パッケージとして:
 
 ```bash
-pi install git:github.com/<you>/pi-metaLoop
+pi install git:github.com/Aero123421/pi-metaloop
 # またはローカルパス
 pi install /path/to/pi-metaLoop
 ```

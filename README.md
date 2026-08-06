@@ -79,7 +79,7 @@ The Supervisor uses standards as the basis for verdicts; criteria not in the sta
 As a pi package:
 
 ```bash
-pi install git:github.com/<you>/pi-metaLoop
+pi install git:github.com/Aero123421/pi-metaloop
 # or a local path
 pi install /path/to/pi-metaLoop
 ```
