@@ -245,7 +245,7 @@ npm run typecheck    # tsc --noEmit (strict)
 
 - Orchestrator / Supervisor default tools are **read-only** (no bash).
 - Worker default tools are read/write/edit without bash; `allowed_scope` is enforced on write/edit **and** checked after run via `git` dirty files when possible.
-- sfh parallel groups are **forced read-only** (`access: read`).
+- sfh parallel groups default to `access: read`; set `executor.sfhAccess` / `sfhToolAccess` / `sfhIntegrateAccess` to `write` or **`full`** in **user** config when needed (project config can only narrow, not raise).
 - Project config may only **narrow** capabilities relative to user/defaults (cannot raise sfh access, swap sfhBinary, or expand tool allow-lists past the user ceiling).
 - Project `standards.md` is treated as **untrusted criteria data** in prompts.
 - Generated flows under `.pi/meta-loop/flows/` may contain user text — gitignore them; do not commit secrets.

@@ -80,7 +80,7 @@ function toTicket(t: any, i: number, previous?: Ticket): Ticket {
 						tool: typeof b.tool === "string" ? b.tool : undefined,
 						model: typeof b.model === "string" ? b.model : undefined,
 						effort: typeof b.effort === "string" ? b.effort : undefined,
-						access: "read",
+			access: typeof b.access === "string" ? b.access : undefined,
 						prompt: String(b.prompt ?? ""),
 					}))
 				: undefined,
@@ -523,16 +523,16 @@ export async function runSupervisedTask(
 				tool: b.tool,
 				model: resolveSfhBranchModel(b, config),
 				effort: resolveSfhBranchEffort(b, config),
-				access: resolveSfhBranchAccess(b, config), // always read
+				access: resolveSfhBranchAccess(b, config),
 				prompt: renderBranchPrompt(b, ticket, input.goal),
 			})),
 			integrationPrompt: renderIntegrationPrompt(ticket, input.goal),
 			integrationModel: resolveSfhIntegrateModel(config),
 			integrationEffort: resolveSfhIntegrateEffort(config),
-			integrationAccess: resolveSfhIntegrateAccess(config), // always read
+			integrationAccess: resolveSfhIntegrateAccess(config),
 			defaultModel: config.executor.sfhModel?.trim() || undefined,
 			defaultEffort: config.executor.sfhEffort?.trim() || undefined,
-			defaultAccess: "read",
+			defaultAccess: config.executor.sfhAccess?.trim() || "read",
 			timeoutSec: ex.timeoutSec,
 			maxParallel: ex.maxParallel,
 		};
@@ -547,17 +547,29 @@ export async function runSupervisedTask(
 			wallClockSec: ex.timeoutSec * Math.max(2, branches.length + 1),
 		});
 		const after = collectGitChangedFiles(cwd);
-		// sfh groups are read-only — any new changes are violations
 		const newFiles = diffNewFiles(before, after);
+		// Effective max access across branches + integrate (config-resolved)
+		const accessLevels = [
+			...branches.map((b) => resolveSfhBranchAccess(b, config)),
+			resolveSfhIntegrateAccess(config),
+		];
+		const maxAccess = accessLevels.includes("full") ? "full" : accessLevels.includes("write") ? "write" : "read";
+		let scopeViolations: string[] = [];
+		if (maxAccess === "read") {
+			scopeViolations = newFiles.map((f) => `${f}: sfh access is read — writes are not allowed`);
+		} else if ((ticket.allowed_scope?.length ?? 0) > 0 || (ticket.forbidden?.length ?? 0) > 0) {
+			scopeViolations = findScopeViolations(newFiles.length ? newFiles : after, cwd, ticket.allowed_scope ?? [], ticket.forbidden ?? []);
+		}
 		const evidence: ExecutionEvidence = {
 			processExitCode: result.exitCode,
-			actualChangedFiles: newFiles,
-			scopeViolations: newFiles.map((f) => `${f}: sfh group must be read-only`),
+			actualChangedFiles: newFiles.length ? newFiles : after,
+			scopeViolations,
 		};
-		if (result.exitCode === 0 && newFiles.length === 0) {
+		if (result.exitCode === 0 && scopeViolations.length === 0) {
 			ticket.status = "done";
 			const meta = [
 				"executor: sfh",
+				`access: ${maxAccess}`,
 				result.costUsd !== undefined ? `cost: $${result.costUsd.toFixed(2)}` : "",
 				result.elapsedSec !== undefined ? `elapsed: ${result.elapsedSec}s` : "",
 				result.runDir ? `run_dir: ${result.runDir}` : "",
@@ -566,15 +578,16 @@ export async function runSupervisedTask(
 				.filter(Boolean)
 				.join("  ");
 			ticket.report = `${meta}\n\n${result.stdout.slice(0, cap)}`;
-			ticket.evidence = { ...evidence, scopeViolations: [] };
+			ticket.evidence = evidence;
 			ticket.claim = {
 				claimedStatus: "done",
+				changed_files: evidence.actualChangedFiles,
 				notes: "sfh integration stdout",
 				raw: result.stdout.slice(0, 8000),
 			};
-		} else if (result.exitCode === 0 && newFiles.length > 0) {
+		} else if (result.exitCode === 0 && scopeViolations.length > 0) {
 			ticket.status = "failed";
-			ticket.error = `sfh claimed success but wrote files: ${newFiles.join(", ")}`;
+			ticket.error = `sfh exit 0 but scope/access violations:\n${scopeViolations.join("\n")}`;
 			ticket.evidence = evidence;
 			ticket.report = result.stdout.slice(0, cap);
 		} else {

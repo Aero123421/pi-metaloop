@@ -270,8 +270,7 @@ export function loadConfig(cwd: string): MetaLoopConfig {
 	applyLayer(merged, legacy, "project");
 	applyLayer(merged, folder, "project");
 
-	// Force sfh access ceilings to read for safety unless user base set higher — still cap integrate to read
-	merged.executor.sfhIntegrateAccess = "read";
+	// Force sfh integrate default stays whatever user set; no hard-coded read-only wipe
 	return merged;
 }
 
@@ -347,12 +346,26 @@ export function resolveSfhIntegrateEffort(config: MetaLoopConfig): string | unde
 	return undefined;
 }
 
-/** Groups are always read-only at the harness layer. */
-export function resolveSfhBranchAccess(_branch: { tool?: string; access?: string }, _config: MetaLoopConfig): string {
+/** Branch access: branch > tool map > sfhAccess > read */
+export function resolveSfhBranchAccess(branch: { tool?: string; access?: string }, config: MetaLoopConfig): string {
+	if (branch.access?.trim()) return normalizeAccess(branch.access);
+	const tool = branch.tool ?? "pi";
+	const v = config.executor.sfhToolAccess?.[tool];
+	if (v?.trim()) return normalizeAccess(v);
+	if (config.executor.sfhAccess?.trim()) return normalizeAccess(config.executor.sfhAccess);
 	return "read";
 }
 
-export function resolveSfhIntegrateAccess(_config: MetaLoopConfig): string {
+/** Integrate access: sfhIntegrateAccess > sfhAccess > read */
+export function resolveSfhIntegrateAccess(config: MetaLoopConfig): string {
+	if (config.executor.sfhIntegrateAccess?.trim()) return normalizeAccess(config.executor.sfhIntegrateAccess);
+	if (config.executor.sfhAccess?.trim()) return normalizeAccess(config.executor.sfhAccess);
+	return "read";
+}
+
+function normalizeAccess(a: string): string {
+	const v = a.trim().toLowerCase();
+	if (v === "write" || v === "full" || v === "read") return v;
 	return "read";
 }
 

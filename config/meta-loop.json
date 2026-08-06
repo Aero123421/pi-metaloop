@@ -48,5 +48,5 @@
 		"concurrency": 1,
 		"perTaskOutputCap": 51200
 	},
-	"notes": "0.2.0-alpha: Orchestrator/Supervisor are read-only (no bash). Worker has no bash by default. sfh groups are force read-only. Project config cannot expand capabilities past user ceiling."
+	"notes": "0.2.0-alpha: Orchestrator/Supervisor read-only tools (no bash). Worker no bash by default. sfh access is configurable (read|write|full); default read. Project config cannot expand past user ceiling."
 }

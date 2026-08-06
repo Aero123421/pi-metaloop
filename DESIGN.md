@@ -12,7 +12,7 @@
 | Orchestrator | read, ls, find, grep（**bash なし**） |
 | Supervisor | read, ls, find, grep（**bash なし**） |
 | Worker | read, write, edit, ls, find, grep（**bash なし**） |
-| sfh group | **access 強制 read** |
+| sfh group | access は config で `read` / `write` / `full`（既定 `read`） |
 
 Project config は user/default の能力を**狭めるだけ**（sfhBinary 変更・access 引き上げ・allowlist 拡大は不可）。
 

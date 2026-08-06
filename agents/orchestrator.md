@@ -26,6 +26,7 @@ tools: read,ls,find,grep
 - `"branches"`: 各ブランチの `{"id", "tool", "model", "effort", "access", "prompt"}`。
   - tool はプロジェクトで許可されたものだけ（config の executor.sfhAllowedTools。空なら制限なし）
   - model / effort / access は省略可（config の executor.sfh* が使われる）。ブランチごとに上書きしたいときだけ書く
+  - access は `read` | `write` | `full`（プロジェクトの天井を超えないこと。未設定時は config 既定、通常 read）
 - `"integration"`: `{"acceptance": [...]}` 統合報告の観測可能な完了条件
 
 制約:
