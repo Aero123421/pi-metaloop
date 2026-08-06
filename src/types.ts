@@ -9,6 +9,8 @@ export interface Branch {
 	id: string;
 	/** sfh のツールプリセット名（pi / opencode / codex / claude / grok など）。既定は pi */
 	tool?: string;
+	/** sfh step.model。ツールごとのモデル ID。未指定なら config の executor.sfhToolModels / sfhModel */
+	model?: string;
 	prompt: string;
 }
 

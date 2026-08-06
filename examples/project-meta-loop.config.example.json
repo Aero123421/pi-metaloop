@@ -1,0 +1,17 @@
+{
+	"_comment": "プロジェクト設定の例。この内容を <プロジェクト>/.pi/meta-loop/config.json に置く。",
+	"roles": {
+		"worker": {
+			"model": ""
+		}
+	},
+	"executor": {
+		"maxParallel": 3,
+		"sfhToolModels": {
+			"pi": ""
+		}
+	},
+	"limits": {
+		"maxTasks": 6
+	}
+}

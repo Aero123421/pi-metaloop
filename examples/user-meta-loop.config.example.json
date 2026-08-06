@@ -1,0 +1,34 @@
+{
+	"_comment": "ユーザー全体設定の例。この内容を ~/.pi/agent/meta-loop/config.json に置く。",
+	"roles": {
+		"orchestrator": {
+			"model": "qwen-token-plan/qwen3.8-max-preview"
+		},
+		"supervisor": {
+			"model": "qwen-token-plan/qwen3.8-max-preview"
+		},
+		"worker": {
+			"model": "qwen-token-plan/qwen3.8-max-preview"
+		}
+	},
+	"executor": {
+		"sfhEnabled": true,
+		"sfhBinary": "sfh",
+		"timeoutSec": 1800,
+		"maxParallel": 4,
+		"sfhModel": "",
+		"sfhIntegrateModel": "",
+		"sfhToolModels": {
+			"pi": "qwen-token-plan/qwen3.8-max-preview",
+			"opencode": "",
+			"codex": "",
+			"claude": ""
+		}
+	},
+	"supervisor": {
+		"auto": true,
+		"checkIntervalMinutes": 30,
+		"workerStartThreshold": 6,
+		"maxConsecutiveFailures": 2
+	}
+}

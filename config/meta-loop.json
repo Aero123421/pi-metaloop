@@ -24,12 +24,15 @@
 		"sfhEnabled": true,
 		"sfhBinary": "sfh",
 		"timeoutSec": 1800,
-		"maxParallel": 4
+		"maxParallel": 4,
+		"sfhModel": "",
+		"sfhIntegrateModel": "",
+		"sfhToolModels": {}
 	},
 	"limits": {
 		"maxTasks": 8,
 		"concurrency": 1,
 		"perTaskOutputCap": 51200
 	},
-	"notes": "model が空なら pi のデフォルトモデルを継承。supervisor.* = 自動監査フック。executor.* = sfh 委譲（execution:sfh チケット）。sfh は必須依存。"
+	"notes": "model が空なら pi のデフォルトモデルを継承。roles.*.model = Primary 側の役別モデル。executor.sfhModel / sfhToolModels / sfhIntegrateModel = sfh 側のモデル。設定の読み込み順: 拡張デフォルト → ~/.pi/agent/meta-loop/config.json → .pi/meta-loop/config.json"
 }

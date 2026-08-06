@@ -112,10 +112,66 @@ pi -e /path/to/pi-metaLoop/src/index.ts
 
 ## 設定
 
-`config/meta-loop.json`（デフォルト）。プロジェクト側は `.pi/meta-loop.json` で上書き:
+読み込み順（後ろが優先）:
+
+```text
+1. 拡張リポジトリ config/meta-loop.json          （出荷デフォルト）
+2. ~/.pi/agent/meta-loop/config.json             （ユーザー全体 — 役別モデルはここに）
+3. <プロジェクト>/.pi/meta-loop/config.json       （プロジェクト上書き）
+```
+
+基準ファイルも同じフォルダ:
+
+```text
+~/.pi/agent/meta-loop/standards.md
+<プロジェクト>/.pi/meta-loop/standards.md
+```
+
+### 役別モデル（pi サブプロセス）
+
+```json
+{
+  "roles": {
+    "orchestrator": { "model": "provider/model-id" },
+    "supervisor":   { "model": "provider/model-id" },
+    "worker":       { "model": "provider/model-id" }
+  }
+}
+```
+
+空文字 = pi のデフォルト継承。形式は pi の `--model` と同じ。
+
+### sfh モデル（並列グループのブランチ）
+
+sfh はステップ単位で `model` を取れる。ブランチごとの解決順:
+
+1. チケットの `branches[].model`（Orchestrator が明示）
+2. `executor.sfhToolModels[tool]`（tool ごとの既定）
+3. `executor.sfhModel`（sfh 全体の既定）
+4. `tool: pi` のときだけ `roles.worker.model`
+
+統合ステップは `sfhIntegrateModel` → `sfhModel` → `roles.worker.model`。
+
+```json
+{
+  "executor": {
+    "sfhModel": "",
+    "sfhIntegrateModel": "",
+    "sfhToolModels": {
+      "pi": "provider/model-id",
+      "opencode": "",
+      "codex": "",
+      "claude": ""
+    }
+  }
+}
+```
+
+例: `examples/user-meta-loop.config.example.json` / `examples/project-meta-loop.config.example.json`
+
+その他のキー:
 
 - `enabled` — 全体キルスイッチ
-- `roles.<role>.model` — 役別モデル（空 = pi デフォルト継承）
 - `roles.<role>.tools` — 役が使えるツール
 - `supervisor.auto` — 自動監査フックの有効/無効
 - `supervisor.checkIntervalMinutes` — 定期監査間隔（標準 30 分）

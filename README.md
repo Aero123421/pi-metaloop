@@ -112,10 +112,70 @@ pi -e /path/to/pi-metaLoop/src/index.ts
 
 ## Configuration
 
-`config/meta-loop.json` (defaults) — override per project with `.pi/meta-loop.json`:
+Layers (later wins):
+
+```text
+1. extension repo config/meta-loop.json          (shipped defaults)
+2. ~/.pi/agent/meta-loop/config.json             (user global — put role models here)
+3. <project>/.pi/meta-loop/config.json           (project override)
+```
+
+Standards live next to config:
+
+```text
+~/.pi/agent/meta-loop/standards.md
+<project>/.pi/meta-loop/standards.md
+```
+
+### Role models (pi subprocesses)
+
+```json
+{
+  "roles": {
+    "orchestrator": { "model": "provider/model-id" },
+    "supervisor":   { "model": "provider/model-id" },
+    "worker":       { "model": "provider/model-id" }
+  }
+}
+```
+
+Empty string = inherit pi's default model. Format is the same as pi `--model`.
+
+### sfh models (parallel group branches)
+
+sfh steps accept a `model` field (tool-dependent). Resolution order for each branch:
+
+1. `branches[].model` on the ticket (Orchestrator override)
+2. `executor.sfhToolModels[tool]` (e.g. different model for `pi` vs `opencode`)
+3. `executor.sfhModel` (global sfh default)
+4. for `tool: pi` only — fall back to `roles.worker.model`
+
+Integrate step uses `executor.sfhIntegrateModel` → `sfhModel` → `roles.worker.model`.
+
+```json
+{
+  "executor": {
+    "sfhEnabled": true,
+    "sfhBinary": "sfh",
+    "timeoutSec": 1800,
+    "maxParallel": 4,
+    "sfhModel": "",
+    "sfhIntegrateModel": "",
+    "sfhToolModels": {
+      "pi": "provider/model-id",
+      "opencode": "",
+      "codex": "",
+      "claude": ""
+    }
+  }
+}
+```
+
+See `examples/user-meta-loop.config.example.json` and `examples/project-meta-loop.config.example.json`.
+
+Other knobs:
 
 - `enabled` — kill switch
-- `roles.<role>.model` — per-role model (empty = inherit pi default)
 - `roles.<role>.tools` — tools available to the role
 - `supervisor.auto` — enable automatic supervision hooks
 - `supervisor.checkIntervalMinutes` — periodic check interval (default 30)

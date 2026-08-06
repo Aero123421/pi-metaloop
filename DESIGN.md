@@ -47,6 +47,25 @@ task_id / goal / deliverables / acceptance / allowed_scope / forbidden / depende
 - Worker には基準を直接渡さない。Orchestrator がチケットに落とし込んだ分だけ受け取る
 - 基準にない事項で Supervisor が yellow/red を出さない規律をプロンプトで固定（過剰介入防止）
 
+## 設定の置き場所（3層）
+
+```text
+1. 拡張リポジトリ/config/meta-loop.json
+2. ~/.pi/agent/meta-loop/config.json     ← 役別モデル・sfh モデルの本命
+3. <cwd>/.pi/meta-loop/config.json       ← プロジェクト固有
+```
+
+基準も同フォルダ: `standards.md`。レガシーの単一ファイル（`.pi/meta-loop.json` / `.pi/meta-loop-standards.md`）も読む。
+
+## モデル割り当て（2系統）
+
+1. **roles.\*.model** — Orchestrator / Supervisor / Worker の pi サブプロセス（`--model`）
+2. **executor.sfh\*** — sfh ステップの model
+   - ブランチ: `branches[].model` > `sfhToolModels[tool]` > `sfhModel` > (pi なら worker.model)
+   - 統合: `sfhIntegrateModel` > `sfhModel` > worker.model
+
+sfh の schema は step / defaults / profile で `model` をサポートしている（v1.1.4 確認済み）。
+
 ## 入れ子起動の防止（決定的）
 
 - `PI_META_LOOP_DEPTH` 環境変数で階層を追跡する

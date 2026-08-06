@@ -12,7 +12,7 @@
  * stay lightweight: goal + ticket only.
  */
 import type { MetaLoopConfig } from "./config.ts";
-import { loadStandards } from "./config.ts";
+import { loadStandards, resolveSfhBranchModel, resolveSfhIntegrateModel } from "./config.ts";
 import { detectSfh, generateFlowYaml, renderBranchPrompt, renderIntegrationPrompt, runSfhFlow, sanitizeId, writeFlowFile, type FlowSpec } from "./sfh-exec.ts";
 import { extractJson, loadRole, runRole } from "./spawn.ts";
 import { checkAutoTriggers, evaluateTriggers, type RuntimeEvent, type SupervisorStats } from "./triggers.ts";
@@ -58,6 +58,7 @@ function toTicket(t: any, i: number, previous?: Ticket): Ticket {
 				? t.branches.map((b: any, j: number) => ({
 						id: String(b.id ?? `branch-${j + 1}`),
 						tool: typeof b.tool === "string" ? b.tool : undefined,
+						model: typeof b.model === "string" ? b.model : undefined,
 						prompt: String(b.prompt ?? ""),
 					}))
 				: undefined,
@@ -265,10 +266,19 @@ export async function runSupervisedTask(
 
 		{
 			const flowName = `meta-loop-${sanitizeId(ticket.id)}`;
+			const integrateModel = resolveSfhIntegrateModel(config);
+			const defaultModel = config.executor.sfhModel?.trim() || undefined;
 			const spec: FlowSpec = {
 				name: flowName,
-				branches: branches.map((b) => ({ id: sanitizeId(b.id), tool: b.tool, prompt: renderBranchPrompt(b, ticket, input.goal) })),
+				branches: branches.map((b) => ({
+					id: sanitizeId(b.id),
+					tool: b.tool,
+					model: resolveSfhBranchModel(b, config),
+					prompt: renderBranchPrompt(b, ticket, input.goal),
+				})),
 				integrationPrompt: renderIntegrationPrompt(ticket, input.goal),
+				integrationModel: integrateModel,
+				defaultModel,
 				timeoutSec: ex.timeoutSec,
 				maxParallel: ex.maxParallel,
 			};

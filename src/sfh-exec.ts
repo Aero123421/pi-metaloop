@@ -49,9 +49,11 @@ function yamlBlock(text: string, indent: number): string {
 
 export interface FlowSpec {
 	name: string;
-	branches: Array<{ id: string; tool?: string; access?: string; prompt: string }>;
+	branches: Array<{ id: string; tool?: string; model?: string; access?: string; prompt: string }>;
 	integrationPrompt: string;
 	integrationTool?: string;
+	integrationModel?: string;
+	defaultModel?: string;
 	timeoutSec: number;
 	maxParallel: number;
 }
@@ -64,6 +66,7 @@ export function generateFlowYaml(spec: FlowSpec): string {
 	lines.push(`defaults:`);
 	lines.push(`  timeout_sec: ${spec.timeoutSec}`);
 	lines.push(`  max_parallel: ${Math.max(1, spec.maxParallel)}`);
+	if (spec.defaultModel) lines.push(`  model: ${JSON.stringify(spec.defaultModel)}`);
 	lines.push(`  env:`);
 	lines.push(`    PI_META_LOOP_DEPTH: "1"`);
 	lines.push(``);
@@ -73,6 +76,7 @@ export function generateFlowYaml(spec: FlowSpec): string {
 	for (const branch of spec.branches) {
 		lines.push(`      - id: ${branch.id}`);
 		lines.push(`        tool: ${branch.tool ?? "pi"}`);
+		if (branch.model) lines.push(`        model: ${JSON.stringify(branch.model)}`);
 		lines.push(`        access: ${branch.access ?? "read"}`);
 		lines.push(`        timeout_sec: ${spec.timeoutSec}`);
 		lines.push(`        prompt: |`);
@@ -80,6 +84,7 @@ export function generateFlowYaml(spec: FlowSpec): string {
 	}
 	lines.push(`  - id: integrate`);
 	lines.push(`    tool: ${spec.integrationTool ?? "pi"}`);
+	if (spec.integrationModel) lines.push(`    model: ${JSON.stringify(spec.integrationModel)}`);
 	lines.push(`    access: read`);
 	lines.push(`    timeout_sec: ${spec.timeoutSec}`);
 	lines.push(`    prompt: |`);

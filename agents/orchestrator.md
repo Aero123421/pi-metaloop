@@ -21,7 +21,9 @@ description: Task lead. Decomposes a goal into bounded task tickets and manages 
 その部分は複数チケットではなく **1 枚のグループチケット** として切ること。
 
 - `"execution": "sfh"` を付ける
-- `"branches"`: 各ブランチの `{"id", "tool", "prompt"}`。tool は pi / opencode / codex / claude / grok など
+- `"branches"`: 各ブランチの `{"id", "tool", "model", "prompt"}`。
+  - tool は pi / opencode / codex / claude / grok など
+  - model は省略可（config の executor.sfhToolModels / sfhModel が使われる）。ブランチごとに上書きしたいときだけ書く
 - `"integration"`: `{"acceptance": [...]}` 統合報告の観測可能な完了条件
 
 制約:
