@@ -47,6 +47,22 @@ task_id / goal / deliverables / acceptance / allowed_scope / forbidden / depende
 - Worker には基準を直接渡さない。Orchestrator がチケットに落とし込んだ分だけ受け取る
 - 基準にない事項で Supervisor が yellow/red を出さない規律をプロンプトで固定（過剰介入防止）
 
+## 入れ子起動の防止（決定的）
+
+- `PI_META_LOOP_DEPTH` 環境変数で階層を追跡する
+- depth 0 = Primary の pi（orchestrate 登録・sfh 委譲可）
+- depth ≥ 1 = 拡張は何も登録しない（worker / orchestrator / supervisor のサブプロセス、および sfh が起動した pi）
+- プロンプトのお願いではなく、ツールが物理的に存在しない状態を作る
+- sfh 委譲時も同変数を渡す（sfh は env を継承。生成する flow.yaml の `env:` にも明記する）
+
+## sfh 統合（実行エンジンと監視）
+
+- Worker は sfh を使わない。単一チケットは pi が直接実行
+- 並列・異種ツールの分岐群は runtime が sfh に直接委譲する（Phase 2.5）
+- sfh を起動できるのは depth 0 の orchestrate runtime のみ
+- 監視（実装済み）: `.sfh/runs/<run>/status.json` を 2 秒ポーリングで読み、フッター・ウィジェット・`/sfh` に表示。手動実行した sfh も見える
+- stuck（人間介入待ち）は必ず通知
+
 ## Supervision（自動 hook 駆動）
 
 - **初回監査は必須・早期に**（Worker 本格稼働の前）。作業設計のレビューであり、コードレビューではない

@@ -115,7 +115,9 @@ pi -e /path/to/pi-metaLoop/src/index.ts
 - The Primary calls `orchestrate` itself for long tasks; ask explicitly if you want it ("this is a long task, use orchestrate").
 - `/tasks` — show the current task board
 - `/verdicts` — Supervisor verdict history
+- `/sfh` — list recent sfh runs and inspect one; `/sfh stop` stops the newest run
 - Footer shows a thin status line while supervised: `supervised executing 3 tasks ●1 ✓2 review:green`
+- If an sfh flow is running in the project, the footer shows live progress (`sfh:<flow> ●running step:<id> fanout 2/3 $0.31 12m`) and a widget appears above the editor. Runs started outside pi are visible too; `stuck` runs always notify.
 
 Users see one conversation. Internal chatter is not surfaced — only the plan, detected misalignments, decisions that truly need you, and final results.
 
@@ -130,11 +132,14 @@ npm run typecheck    # tsc --noEmit (strict)
 
 This extension spawns `pi` subprocesses with your full permissions. Agent prompts come from this repository only (no project-local agent loading). Review the code before installing, as with any pi package.
 
+**Nesting guard:** spawned subprocesses set `PI_META_LOOP_DEPTH >= 1`, which makes this extension register nothing — workers, role subprocesses, and pi instances launched by sfh can never re-orchestrate or re-delegate. Recursion is structurally impossible.
+
 ## Roadmap
 
 - [x] Phase 1 — orchestrate tool, initial supervision, G/Y/R, task tickets, per-role models
 - [x] Phase 2 — automatic Supervisor hooks, step-driven Orchestrator, guidance injection, conversation context, standards
-- [ ] Phase 2.5 — parallel workers, scope-violation detection via `tool_call` hooks
+- [x] sfh TUI monitor — live `status.json` polling, footer/widget, `/sfh` command, nesting guard
+- [ ] Phase 2.5 — sfh execution backend (parallel/heterogeneous branch groups + integration contract), guard extension for scope enforcement
 - [ ] Phase 3 — harness diagnosis (repeated failures → rules/skills/prompts weaknesses)
 - [ ] Phase 4 — evolution loop (logs + scores, external improver) — research-grade, optional
 

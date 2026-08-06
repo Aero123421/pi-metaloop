@@ -115,7 +115,9 @@ pi -e /path/to/pi-metaLoop/src/index.ts
 - 長期タスクは Primary が自分で `orchestrate` を呼ぶ。使わせたい場合は「長期タスクなので orchestrate で」と明示すればよい
 - `/tasks` — タスクボード表示
 - `/verdicts` — Supervisor の判定履歴
+- `/sfh` — このプロジェクトの sfh 実行履歴を一覧・詳細表示。`/sfh stop` で最新の run を停止
 - supervised 中はフッターに薄いステータス: `supervised executing 3 tasks ●1 ✓2 review:green`
+- プロジェクトで sfh フローが動いている間は、フッターにライブ進捗（`sfh:<flow> ●running step:<id> fanout 2/3 $0.31 12m`）とエディタ上ウィジェットを表示。pi 外から手動実行した sfh も見える。stuck（人間介入待ち）は必ず通知する
 
 ユーザーに見える会話は一本。内部実況は出さず、計画・認識ズレの修正・本当に必要な判断・完了物だけを表に出す。
 
@@ -130,11 +132,14 @@ npm run typecheck    # tsc --noEmit (strict)
 
 この拡張はあなたの権限で `pi` サブプロセスを起動する。エージェントのプロンプトはこのリポジトリ内のもののみを使用する（プロジェクトローカルのエージェント定義は読み込まない）。他の pi パッケージと同様に、インストール前にコードを確認すること。
 
+**入れ子起動の防止**: サブプロセスには `PI_META_LOOP_DEPTH >= 1` が渡され、この拡張は何も登録しない。worker・各役のサブプロセス・sfh が起動した pi は orchestrate を物理的に持たず、再帰は構造的に不可能。
+
 ## ロードマップ
 
 - [x] Phase 1 — orchestrate ツール / 初期監査 / G-Y-R / 作業票 / 役別モデル
 - [x] Phase 2 — Supervisor 自動フック / ステップ駆動 Orchestrator / guidance 挿入 / 会話文脈 / 点検基準
-- [ ] Phase 2.5 — Worker 並列実行、`tool_call` フックによるスコープ逸脱検知
+- [x] sfh TUI モニター — status.json ポーリング / フッター・ウィジェット / `/sfh` / 入れ子ガード
+- [ ] Phase 2.5 — sfh 実行バックエンド（並列・異種ツール分岐群＋統合約）、スコープ強制ガード拡張
 - [ ] Phase 3 — ハーネス診断（反復障害から rules/skills/prompts の弱点指摘）
 - [ ] Phase 4 — 進化ループ（ログとスコアの蓄積、外側 improver）— 研究寄り、任意
 

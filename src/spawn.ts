@@ -96,10 +96,14 @@ export async function runRole(
 
 	const result = await new Promise<RoleRunResult>((resolve) => {
 		const invocation = getPiInvocation([...args, "--append-system-prompt", promptPath, `Task: ${task}`]);
+		// Nesting guard: subprocess roles (and anything they spawn) must never
+		// re-register the orchestration extension.
+		const depth = Number.parseInt(process.env.PI_META_LOOP_DEPTH ?? "0", 10) || 0;
 		const proc = spawn(invocation.command, invocation.args, {
 			cwd: opts.cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
+			env: { ...process.env, PI_META_LOOP_DEPTH: String(depth + 1) },
 		});
 
 		let buffer = "";

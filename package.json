@@ -3,6 +3,7 @@
 	"version": "0.1.0",
 	"description": "Adaptive supervised orchestration for pi: short tasks stay lightweight, long tasks get an Orchestrator + Supervisor + Workers with role-split models, automatic supervision hooks, and standards-based review.",
 	"license": "MIT",
+	"type": "module",
 	"keywords": ["pi-package", "orchestration", "multi-agent", "metacognition", "supervision"],
 	"pi": {
 		"extensions": ["./src/index.ts"]
