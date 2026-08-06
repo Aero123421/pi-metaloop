@@ -13,6 +13,20 @@
 - **権限分離** — ユーザー意図の所有者は常に Primary 一つ。計画の所有者・異常の検出者も分離
 - **外付けメタ認知** — 監視と制御はハーネス側で行う。モデルの自己反省には頼らない
 
+## 前提（必須依存）
+
+- [pi](https://github.com/earendil-works/pi)（この拡張の本体）
+- **[sfh (SimpleFlowHarness)](https://github.com/Aero123421/SimpleFlowHarness) — 必須依存**。グループチケット（`execution: "sfh"`）の実行に使う
+
+```bash
+# Windows PowerShell
+irm https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.ps1 | iex
+# macOS / Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.sh | sh
+```
+
+sfh 未インストールの場合、グループチケットはインストール手順付きのエラーでブロックされる（通常チケットはそのまま動く）。
+
 ## 動作
 
 ```text
@@ -107,8 +121,33 @@ pi -e /path/to/pi-metaLoop/src/index.ts
 - `supervisor.checkIntervalMinutes` — 定期監査間隔（標準 30 分）
 - `supervisor.workerStartThreshold` — Worker 起動数がこの値に達したら監査（標準 6）
 - `supervisor.maxConsecutiveFailures` — この数の連続失敗で即時監査（標準 2）
+- `executor.sfhEnabled` — グループチケットを sfh に委譲するか（標準 true）
+- `executor.sfhBinary` — sfh バイナリ名/パス（標準 `sfh`）
+- `executor.timeoutSec` — グループごとの壁時計上限（標準 1800）
+- `executor.maxParallel` — sfh の最大並列数（標準 4）
 - `limits.maxTasks` — チケット上限（標準 8）
 - `limits.perTaskOutputCap` — サブプロセスごとの出力上限
+
+## グループチケット（並列ブランチ＋統合約）
+
+Orchestrator は、調査・探索・比較のような並列向き作業を複数チケットではなく **1 枚のグループチケット** として切れる:
+
+```json
+{
+  "id": "research-01",
+  "execution": "sfh",
+  "goal": "OAuth 対応の調査と既存コード探索",
+  "branches": [
+    { "id": "web", "tool": "opencode", "prompt": "ライブラリ比較…" },
+    { "id": "code", "tool": "pi", "prompt": "既存認証フローの調査…" }
+  ],
+  "integration": { "acceptance": ["全ブランチ網羅", "矛盾点列挙", "出典明記"] }
+}
+```
+
+runtime は `flow.yaml` を生成（`.pi/meta-loop/flows/` に保存）し、`PI_META_LOOP_DEPTH=1` を env に持って `sfh run` をフォアグラウンド実行する。統合報告（sfh の stdout）とコスト/経過時間はボードに回収される。実行中のライブ進捗は TUI モニターが表示する。
+
+実装チケットはネイティブ（Worker の pi サブプロセス）のまま。グループは並列化できる調査系作業専用。
 
 ## コマンドと UX
 
@@ -139,7 +178,8 @@ npm run typecheck    # tsc --noEmit (strict)
 - [x] Phase 1 — orchestrate ツール / 初期監査 / G-Y-R / 作業票 / 役別モデル
 - [x] Phase 2 — Supervisor 自動フック / ステップ駆動 Orchestrator / guidance 挿入 / 会話文脈 / 点検基準
 - [x] sfh TUI モニター — status.json ポーリング / フッター・ウィジェット / `/sfh` / 入れ子ガード
-- [ ] Phase 2.5 — sfh 実行バックエンド（並列・異種ツール分岐群＋統合約）、スコープ強制ガード拡張
+- [x] Phase 2.5 — sfh 実行バックエンド：グループチケット・統合約・flow.yaml 生成・結果回収（sfh は必須依存）
+- [ ] Phase 2.75 — Worker サブプロセス内で allowed_scope を強制するガード拡張
 - [ ] Phase 3 — ハーネス診断（反復障害から rules/skills/prompts の弱点指摘）
 - [ ] Phase 4 — 進化ループ（ログとスコアの蓄積、外側 improver）— 研究寄り、任意
 

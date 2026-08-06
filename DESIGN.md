@@ -57,9 +57,13 @@ task_id / goal / deliverables / acceptance / allowed_scope / forbidden / depende
 
 ## sfh 統合（実行エンジンと監視）
 
+- **sfh は必須依存**。グループチケット（execution: sfh）の実行に使う
 - Worker は sfh を使わない。単一チケットは pi が直接実行
-- 並列・異種ツールの分岐群は runtime が sfh に直接委譲する（Phase 2.5）
+- 並列・異種ツールの分岐群は runtime が sfh に直接委譲する
 - sfh を起動できるのは depth 0 の orchestrate runtime のみ
+- **統合約**: グループチケットは integration.acceptance（観測可能な完了条件）を必ず持つ。統合は fanout 後の単一ステップで行い、重複排除・矛盾列挙・出典明記を要求する
+- 生成した flow.yaml は `.pi/meta-loop/flows/` に保存（検査・再利用可能）
+- 結果回収: sfh の stdout（統合報告）+ status.json のコスト/経過時間をボードに乗せる
 - 監視（実装済み）: `.sfh/runs/<run>/status.json` を 2 秒ポーリングで読み、フッター・ウィジェット・`/sfh` に表示。手動実行した sfh も見える
 - stuck（人間介入待ち）は必ず通知
 

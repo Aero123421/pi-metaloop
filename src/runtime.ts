@@ -13,6 +13,7 @@
  */
 import type { MetaLoopConfig } from "./config.ts";
 import { loadStandards } from "./config.ts";
+import { detectSfh, generateFlowYaml, renderBranchPrompt, renderIntegrationPrompt, runSfhFlow, sanitizeId, writeFlowFile, type FlowSpec } from "./sfh-exec.ts";
 import { extractJson, loadRole, runRole } from "./spawn.ts";
 import { checkAutoTriggers, evaluateTriggers, type RuntimeEvent, type SupervisorStats } from "./triggers.ts";
 import type { OrchestrateInput, TaskBoard, Ticket, Verdict } from "./types.ts";
@@ -51,6 +52,19 @@ function toTicket(t: any, i: number, previous?: Ticket): Ticket {
 		forbidden: t.forbidden ?? [],
 		dependencies: t.dependencies ?? [],
 		context: t.context,
+		execution: t.execution === "sfh" ? "sfh" : "native",
+		branches:
+			Array.isArray(t.branches) && t.branches.length > 0
+				? t.branches.map((b: any, j: number) => ({
+						id: String(b.id ?? `branch-${j + 1}`),
+						tool: typeof b.tool === "string" ? b.tool : undefined,
+						prompt: String(b.prompt ?? ""),
+					}))
+				: undefined,
+		integration:
+			t.integration && Array.isArray(t.integration.acceptance)
+				? { acceptance: t.integration.acceptance.map(String), output: t.integration.output }
+				: undefined,
 		status: previous && previous.status !== "pending" && previous.status !== "running" ? previous.status : "pending",
 		report: previous?.report,
 		error: previous?.error,
@@ -227,6 +241,56 @@ export async function runSupervisedTask(
 		return applyVerdict(verdict, reason);
 	}
 
+	// ---------- Group tickets (sfh delegation or native fallback) ----------
+
+	async function executeGroupTicket(ticket: Ticket): Promise<void> {
+		const ex = config.executor;
+		const branches = ticket.branches ?? [];
+		const binary = ex.sfhEnabled ? detectSfh(ex.sfhBinary) : null;
+
+		if (!ex.sfhEnabled) {
+			ticket.status = "blocked";
+			ticket.error = "executor.sfhEnabled=false です。グループチケットは実行できません";
+			return;
+		}
+		if (!binary) {
+			ticket.status = "blocked";
+			ticket.error = [
+				"sfh（SimpleFlowHarness）がインストールされていません。必須依存です。",
+				"Windows PowerShell: irm https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.ps1 | iex",
+				"macOS/Linux: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.sh | sh",
+			].join("\n");
+			return;
+		}
+
+		{
+			const flowName = `meta-loop-${sanitizeId(ticket.id)}`;
+			const spec: FlowSpec = {
+				name: flowName,
+				branches: branches.map((b) => ({ id: sanitizeId(b.id), tool: b.tool, prompt: renderBranchPrompt(b, ticket, input.goal) })),
+				integrationPrompt: renderIntegrationPrompt(ticket, input.goal),
+				timeoutSec: ex.timeoutSec,
+				maxParallel: ex.maxParallel,
+			};
+			const flowFile = writeFlowFile(cwd, ticket.id, generateFlowYaml(spec));
+			const result = await runSfhFlow({ binary, flowFile, flowName, cwd, signal: hooks.signal });
+			if (result.exitCode === 0) {
+				ticket.status = "done";
+				const meta = [
+					"executor: sfh",
+					result.costUsd !== undefined ? `cost: $${result.costUsd.toFixed(2)}` : "",
+					result.elapsedSec !== undefined ? `elapsed: ${result.elapsedSec}s` : "",
+					result.runDir ? `run_dir: ${result.runDir}` : "",
+				]
+						.filter(Boolean)
+						.join("  ");
+				ticket.report = `${meta}\n\n${result.stdout.slice(0, cap)}`;
+				ticket.status = "failed";
+				ticket.error = `sfh exit ${result.exitCode}: ${(result.stderr || result.stdout).slice(-1000)}`;
+			}
+		}
+	}
+
 	// ---------- 1. Plan ----------
 	notify(hooks, board, "planning: Orchestrator が分解中");
 	if (!(await orchestratorPlan())) {
@@ -278,34 +342,41 @@ export async function runSupervisedTask(
 		ticket.status = "running";
 		stats.workerStarts++;
 		stats.startsSinceReview++;
-		notify(hooks, board, `executing: ${ticket.id} 実行中`);
 
-		const workerTask = [
-			"以下の作業票を実行してください。",
-			"",
-			"## 作業票",
-			"```json",
-			JSON.stringify(ticket, null, 2),
-			"```",
-			"",
-			`## ユーザーの要求（原文）\n${input.goal}`,
-		].join("\n");
-
-		const run = await runRole(worker, workerTask, { cwd, signal: hooks.signal, outputCap: cap });
-		const report = extractJson<{ status?: string }>(run.output);
-
-		if (run.exitCode !== 0 && !report) {
-			ticket.status = "failed";
-			ticket.error = run.output.slice(0, 1000);
-		} else if (report?.status === "done") {
-			ticket.status = "done";
-			ticket.report = run.output.slice(0, 2000);
-		} else if (report?.status === "partial") {
-			ticket.status = "partial";
-			ticket.report = run.output.slice(0, 2000);
+		const isGroup = ticket.execution === "sfh" && Array.isArray(ticket.branches) && ticket.branches.length > 0;
+		if (isGroup) {
+			notify(hooks, board, `executing: ${ticket.id}（sfh グループ・${ticket.branches!.length} ブランチ）`);
+			await executeGroupTicket(ticket);
 		} else {
-			ticket.status = "blocked";
-			ticket.report = run.output.slice(0, 2000);
+			notify(hooks, board, `executing: ${ticket.id} 実行中`);
+
+			const workerTask = [
+				"以下の作業票を実行してください。",
+				"",
+				"## 作業票",
+				"```json",
+				JSON.stringify(ticket, null, 2),
+				"```",
+				"",
+				`## ユーザーの要求（原文）\n${input.goal}`,
+			].join("\n");
+
+			const run = await runRole(worker, workerTask, { cwd, signal: hooks.signal, outputCap: cap });
+			const report = extractJson<{ status?: string }>(run.output);
+
+			if (run.exitCode !== 0 && !report) {
+				ticket.status = "failed";
+				ticket.error = run.output.slice(0, 1000);
+			} else if (report?.status === "done") {
+				ticket.status = "done";
+				ticket.report = run.output.slice(0, 2000);
+			} else if (report?.status === "partial") {
+				ticket.status = "partial";
+				ticket.report = run.output.slice(0, 2000);
+			} else {
+				ticket.status = "blocked";
+				ticket.report = run.output.slice(0, 2000);
+			}
 		}
 
 		// Event-driven triggers (failures, blocks).

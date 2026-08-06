@@ -4,6 +4,20 @@
 
 export type TicketStatus = "pending" | "running" | "done" | "partial" | "blocked" | "failed";
 
+/** 並列グループチケットの 1 ブランチ */
+export interface Branch {
+	id: string;
+	/** sfh のツールプリセット名（pi / opencode / codex / claude / grok など）。既定は pi */
+	tool?: string;
+	prompt: string;
+}
+
+/** 統合約：並列ブランチの出力をどう纏めるかの観測可能な条件 */
+export interface IntegrationContract {
+	acceptance: string[];
+	output?: string;
+}
+
 export interface Ticket {
 	id: string;
 	goal: string;
@@ -13,6 +27,10 @@ export interface Ticket {
 	forbidden: string[];
 	dependencies: string[];
 	context?: string;
+	/** native = Worker（pi）が直接実行。sfh = 並列ブランチ群を sfh に委譲 */
+	execution?: "native" | "sfh";
+	branches?: Branch[];
+	integration?: IntegrationContract;
 	status: TicketStatus;
 	report?: string;
 	error?: string;

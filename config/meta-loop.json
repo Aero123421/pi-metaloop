@@ -20,10 +20,16 @@
 		"workerStartThreshold": 6,
 		"maxConsecutiveFailures": 2
 	},
+	"executor": {
+		"sfhEnabled": true,
+		"sfhBinary": "sfh",
+		"timeoutSec": 1800,
+		"maxParallel": 4
+	},
 	"limits": {
 		"maxTasks": 8,
 		"concurrency": 1,
 		"perTaskOutputCap": 51200
 	},
-	"notes": "model が空なら pi のデフォルトモデルを継承。supervisor.checkIntervalMinutes = Orchestrator 起動後の定期監査間隔（分）。workerStartThreshold = この数の Worker が起動したら一度監査する。"
+	"notes": "model が空なら pi のデフォルトモデルを継承。supervisor.* = 自動監査フック。executor.* = sfh 委譲（execution:sfh チケット）。sfh は必須依存。"
 }

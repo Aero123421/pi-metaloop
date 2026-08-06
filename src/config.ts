@@ -23,6 +23,16 @@ export interface SupervisorSettings {
 	maxConsecutiveFailures: number;
 }
 
+export interface ExecutorSettings {
+	/** sfh は必須依存。execution:"sfh" チケットの委譲先 */
+	sfhEnabled: boolean;
+	sfhBinary: string;
+	/** グループごとの壁時計上限（秒）。sfh の timeout_sec に渡す */
+	timeoutSec: number;
+	/** sfh の最大並列数 */
+	maxParallel: number;
+}
+
 export interface MetaLoopConfig {
 	enabled: boolean;
 	roles: {
@@ -31,6 +41,7 @@ export interface MetaLoopConfig {
 		worker: RoleConfig;
 	};
 	supervisor: SupervisorSettings;
+	executor: ExecutorSettings;
 	limits: {
 		maxTasks: number;
 		concurrency: number;
@@ -50,6 +61,12 @@ const defaultConfig: MetaLoopConfig = {
 		checkIntervalMinutes: 30,
 		workerStartThreshold: 6,
 		maxConsecutiveFailures: 2,
+	},
+	executor: {
+		sfhEnabled: true,
+		sfhBinary: "sfh",
+		timeoutSec: 1800,
+		maxParallel: 4,
 	},
 	limits: {
 		maxTasks: 8,
@@ -119,6 +136,9 @@ export function loadConfig(cwd: string): MetaLoopConfig {
 		}
 		if (layer.supervisor && typeof layer.supervisor === "object") {
 			merged.supervisor = { ...merged.supervisor, ...layer.supervisor };
+		}
+		if (layer.executor && typeof layer.executor === "object") {
+			merged.executor = { ...merged.executor, ...layer.executor };
 		}
 	}
 	return merged as MetaLoopConfig;

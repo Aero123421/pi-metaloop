@@ -13,6 +13,20 @@ Adaptive supervised orchestration for [pi](https://github.com/earendil-works/pi)
 - **Separated authority** — exactly one owner of user intent (the Primary agent), one owner of the execution plan, one detector of anomalies.
 - **Externalized metacognition** — monitoring and control are harness-level, not delegated to the model's self-reflection.
 
+## Requirements
+
+- [pi](https://github.com/earendil-works/pi) (this is a pi extension)
+- **[sfh (SimpleFlowHarness)](https://github.com/Aero123421/SimpleFlowHarness) — required dependency** for group tickets (`execution: "sfh"`), which run parallel branch groups with an integration contract
+
+```bash
+# Windows PowerShell
+irm https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.ps1 | iex
+# macOS / Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.sh | sh
+```
+
+Without sfh, group tickets are blocked with install instructions; normal (native) tickets still work.
+
 ## How it works
 
 ```text
@@ -107,8 +121,33 @@ pi -e /path/to/pi-metaLoop/src/index.ts
 - `supervisor.checkIntervalMinutes` — periodic check interval (default 30)
 - `supervisor.workerStartThreshold` — check after this many worker starts (default 6)
 - `supervisor.maxConsecutiveFailures` — immediate check after this many consecutive failures (default 2)
+- `executor.sfhEnabled` — delegate `execution: "sfh"` group tickets to sfh (default true)
+- `executor.sfhBinary` — sfh binary name/path (default `sfh`)
+- `executor.timeoutSec` — wall-clock limit per group (default 1800)
+- `executor.maxParallel` — sfh max parallel branches (default 4)
 - `limits.maxTasks` — ticket cap (default 8)
 - `limits.perTaskOutputCap` — output cap per subprocess
+
+## Group tickets (parallel branches + integration contract)
+
+The Orchestrator may cut research/exploration/comparison work into a single **group ticket** instead of several tickets:
+
+```json
+{
+  "id": "research-01",
+  "execution": "sfh",
+  "goal": "OAuth approaches: research and codebase exploration",
+  "branches": [
+    { "id": "web", "tool": "opencode", "prompt": "library comparison..." },
+    { "id": "code", "tool": "pi", "prompt": "existing auth flow survey..." }
+  ],
+  "integration": { "acceptance": ["all branches covered", "contradictions listed", "sources noted"] }
+}
+```
+
+The runtime generates a `flow.yaml` (saved under `.pi/meta-loop/flows/`) and runs `sfh run` in the foreground with `PI_META_LOOP_DEPTH=1` in the flow env. The integrated report (sfh stdout) plus cost/elapsed metadata is collected into the board. The TUI monitor shows live progress while the flow runs.
+
+Implementation tickets stay native (Worker pi subprocesses). Groups are for parallelizable investigation work only.
 
 ## Commands & UX
 
@@ -139,7 +178,8 @@ This extension spawns `pi` subprocesses with your full permissions. Agent prompt
 - [x] Phase 1 — orchestrate tool, initial supervision, G/Y/R, task tickets, per-role models
 - [x] Phase 2 — automatic Supervisor hooks, step-driven Orchestrator, guidance injection, conversation context, standards
 - [x] sfh TUI monitor — live `status.json` polling, footer/widget, `/sfh` command, nesting guard
-- [ ] Phase 2.5 — sfh execution backend (parallel/heterogeneous branch groups + integration contract), guard extension for scope enforcement
+- [x] Phase 2.5 — sfh execution backend: group tickets, integration contract, flow.yaml generation, result collection (sfh is a required dependency)
+- [ ] Phase 2.75 — guard extension enforcing `allowed_scope` inside worker subprocesses
 - [ ] Phase 3 — harness diagnosis (repeated failures → rules/skills/prompts weaknesses)
 - [ ] Phase 4 — evolution loop (logs + scores, external improver) — research-grade, optional
 

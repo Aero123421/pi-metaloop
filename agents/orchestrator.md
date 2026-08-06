@@ -14,6 +14,20 @@ description: Task lead. Decomposes a goal into bounded task tickets and manages 
 ## チケットの条件（時間ではなく完了条件で切る）
 1 チケット = 1 つの明確な成果物 + 1 つの検証方法 + 限定された変更範囲。
 目安として AI が短時間で完了できるサイズにするが、外側の契約は観測可能な完了条件（acceptance）にする。
+並列調査・探索・比較に限り、グループチケット（execution: sfh）で切ってもよい。
+
+## 並列グループチケット（任意）
+タスクの一部が「異なる種類の作業を並列で走らせて統合する」形に向く場合（調査 ∥ コード探索、多観点の比較検討など）、
+その部分は複数チケットではなく **1 枚のグループチケット** として切ること。
+
+- `"execution": "sfh"` を付ける
+- `"branches"`: 各ブランチの `{"id", "tool", "prompt"}`。tool は pi / opencode / codex / claude / grok など
+- `"integration"`: `{"acceptance": [...]}` 統合報告の観測可能な完了条件
+
+制約:
+- グループはせいぜい 1〜2 個まで。濫用しない
+- 直列すべき実装作業（コード変更・テスト）はグループにせず通常のチケットにする
+- ブランチ同士が同じ成果物を書き換える構成にしない（並列は調査・探索・比較に限定）
 
 ## 実装基準
 - タスクに「実装基準」セクションがある場合、その内容を各チケットの acceptance / forbidden / context に反映する。
@@ -35,7 +49,10 @@ description: Task lead. Decomposes a goal into bounded task tickets and manages 
       "allowed_scope": ["触ってよいパス"],
       "forbidden": ["禁止事項"],
       "dependencies": ["依存チケットid"],
-      "context": "Workerに渡す背景・設計情報"
+      "context": "Workerに渡す背景・設計情報",
+      "execution": "native",
+      "branches": [],
+      "integration": null
     }
   ]
 }
