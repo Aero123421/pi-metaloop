@@ -110,6 +110,16 @@ Quick test without installing:
 pi -e /path/to/pi-metaLoop/src/index.ts
 ```
 
+### First-time project setup (skill)
+
+Explicitly invoke:
+
+```text
+/skill:meta-loop-setup
+```
+
+Interactive wizard: user vs project scope, Orchestrator/Supervisor/Worker models, sfh allowed tools + per-tool model/effort/access, standards. Writes `~/.pi/agent/meta-loop/` and/or `.pi/meta-loop/`.
+
 ## Configuration
 
 Layers (later wins):

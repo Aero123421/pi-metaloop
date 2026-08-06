@@ -40,21 +40,31 @@ export interface ExecutorSettings {
 	timeoutSec: number;
 	/** sfh の最大並列数 */
 	maxParallel: number;
-	/**
-	 * sfh ステップのデフォルト model（ブランチ・統合で未指定時）。
-	 * sfh の --model / step.model に渡る文字列（ツールごとに解釈が異なる）。
-	 */
+	/** sfh ステップのデフォルト model（ブランチ・統合で未指定時）。 */
 	sfhModel?: string;
-	/**
-	 * 統合ステップ専用 model。未指定なら sfhModel → roles.worker.model の順。
-	 */
+	/** 統合ステップ専用 model。未指定なら sfhModel → roles.worker.model の順。 */
 	sfhIntegrateModel?: string;
-	/**
-	 * ツール別のデフォルト model。
-	 * 例: { "pi": "qwen-token-plan/qwen3.8-max-preview", "opencode": "..." }
-	 * ブランチに model が無いとき tool 名で引く。
-	 */
+	/** ツール別のデフォルト model。例: { "pi": "provider/id", "opencode": "..." } */
 	sfhToolModels?: Record<string, string>;
+	/**
+	 * sfh の effort（ツールが解釈。例: low/medium/high）。
+	 * ブランチ未指定時の既定。
+	 */
+	sfhEffort?: string;
+	/** ツール別 effort。例: { "codex": "high", "pi": "medium" } */
+	sfhToolEfforts?: Record<string, string>;
+	/** 統合ステップの effort */
+	sfhIntegrateEffort?: string;
+	/**
+	 * sfh access: read | write | full（ブランチ既定。調査系は read 推奨）
+	 */
+	sfhAccess?: string;
+	/** ツール別 access */
+	sfhToolAccess?: Record<string, string>;
+	/** 統合ステップの access（既定 read） */
+	sfhIntegrateAccess?: string;
+	/** グループで許可する tool 名の白リスト。空/省略 = 制限なし */
+	sfhAllowedTools?: string[];
 }
 
 export interface MetaLoopConfig {
@@ -95,6 +105,13 @@ const defaultConfig: MetaLoopConfig = {
 		sfhModel: "",
 		sfhIntegrateModel: "",
 		sfhToolModels: {},
+		sfhEffort: "",
+		sfhToolEfforts: {},
+		sfhIntegrateEffort: "",
+		sfhAccess: "read",
+		sfhToolAccess: {},
+		sfhIntegrateAccess: "read",
+		sfhAllowedTools: [],
 	},
 	escalation: { ...defaultEscalation },
 	limits: {
@@ -142,6 +159,21 @@ function applyLayer(merged: any, layer: Record<string, unknown> | null): void {
 				...ex.sfhToolModels,
 			};
 		}
+		if (ex.sfhToolEfforts && typeof ex.sfhToolEfforts === "object") {
+			merged.executor.sfhToolEfforts = {
+				...(merged.executor.sfhToolEfforts ?? {}),
+				...ex.sfhToolEfforts,
+			};
+		}
+		if (ex.sfhToolAccess && typeof ex.sfhToolAccess === "object") {
+			merged.executor.sfhToolAccess = {
+				...(merged.executor.sfhToolAccess ?? {}),
+				...ex.sfhToolAccess,
+			};
+		}
+		if (Array.isArray(ex.sfhAllowedTools)) {
+			merged.executor.sfhAllowedTools = ex.sfhAllowedTools.map(String);
+		}
 	}
 	if (layer.escalation && typeof layer.escalation === "object") {
 		merged.escalation = { ...merged.escalation, ...layer.escalation };
@@ -170,7 +202,13 @@ export function loadConfig(cwd: string): MetaLoopConfig {
 			worker: { ...defaultConfig.roles.worker },
 		},
 		supervisor: { ...defaultConfig.supervisor },
-		executor: { ...defaultConfig.executor, sfhToolModels: { ...(defaultConfig.executor.sfhToolModels ?? {}) } },
+		executor: {
+			...defaultConfig.executor,
+			sfhToolModels: { ...(defaultConfig.executor.sfhToolModels ?? {}) },
+			sfhToolEfforts: { ...(defaultConfig.executor.sfhToolEfforts ?? {}) },
+			sfhToolAccess: { ...(defaultConfig.executor.sfhToolAccess ?? {}) },
+			sfhAllowedTools: [...(defaultConfig.executor.sfhAllowedTools ?? [])],
+		},
 		escalation: { ...defaultConfig.escalation },
 		limits: { ...defaultConfig.limits },
 	};
@@ -229,4 +267,42 @@ export function resolveSfhIntegrateModel(config: MetaLoopConfig): string | undef
 	if (config.executor.sfhModel?.trim()) return config.executor.sfhModel.trim();
 	if (config.roles.worker.model?.trim()) return config.roles.worker.model.trim();
 	return undefined;
+}
+
+export function resolveSfhBranchEffort(branch: { tool?: string; effort?: string }, config: MetaLoopConfig): string | undefined {
+	if (branch.effort?.trim()) return branch.effort.trim();
+	const tool = branch.tool ?? "pi";
+	const v = config.executor.sfhToolEfforts?.[tool];
+	if (v?.trim()) return v.trim();
+	if (config.executor.sfhEffort?.trim()) return config.executor.sfhEffort.trim();
+	return undefined;
+}
+
+export function resolveSfhIntegrateEffort(config: MetaLoopConfig): string | undefined {
+	if (config.executor.sfhIntegrateEffort?.trim()) return config.executor.sfhIntegrateEffort.trim();
+	if (config.executor.sfhEffort?.trim()) return config.executor.sfhEffort.trim();
+	return undefined;
+}
+
+export function resolveSfhBranchAccess(branch: { tool?: string; access?: string }, config: MetaLoopConfig): string {
+	if (branch.access?.trim()) return branch.access.trim();
+	const tool = branch.tool ?? "pi";
+	const v = config.executor.sfhToolAccess?.[tool];
+	if (v?.trim()) return v.trim();
+	if (config.executor.sfhAccess?.trim()) return config.executor.sfhAccess.trim();
+	return "read";
+}
+
+export function resolveSfhIntegrateAccess(config: MetaLoopConfig): string {
+	if (config.executor.sfhIntegrateAccess?.trim()) return config.executor.sfhIntegrateAccess.trim();
+	return "read";
+}
+
+/** Returns error if tool is not on the allow-list (when the list is non-empty). */
+export function assertSfhToolAllowed(tool: string | undefined, config: MetaLoopConfig): string | null {
+	const list = config.executor.sfhAllowedTools ?? [];
+	if (list.length === 0) return null;
+	const t = tool ?? "pi";
+	if (!list.includes(t)) return `sfh tool "${t}" はこのプロジェクトでは許可されていません（許可: ${list.join(", ")}）`;
+	return null;
 }

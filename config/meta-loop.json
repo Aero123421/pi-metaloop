@@ -27,7 +27,14 @@
 		"maxParallel": 4,
 		"sfhModel": "",
 		"sfhIntegrateModel": "",
-		"sfhToolModels": {}
+		"sfhToolModels": {},
+		"sfhEffort": "",
+		"sfhToolEfforts": {},
+		"sfhIntegrateEffort": "",
+		"sfhAccess": "read",
+		"sfhToolAccess": {},
+		"sfhIntegrateAccess": "read",
+		"sfhAllowedTools": []
 	},
 	"escalation": {
 		"enabled": true,

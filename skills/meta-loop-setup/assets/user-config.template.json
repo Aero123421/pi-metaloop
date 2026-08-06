@@ -1,0 +1,57 @@
+{
+	"roles": {
+		"orchestrator": {
+			"model": ""
+		},
+		"supervisor": {
+			"model": ""
+		},
+		"worker": {
+			"model": ""
+		}
+	},
+	"executor": {
+		"sfhEnabled": true,
+		"sfhBinary": "sfh",
+		"timeoutSec": 1800,
+		"maxParallel": 4,
+		"sfhAllowedTools": [],
+		"sfhModel": "",
+		"sfhEffort": "",
+		"sfhAccess": "read",
+		"sfhToolModels": {
+			"pi": "",
+			"opencode": "",
+			"codex": "",
+			"claude": ""
+		},
+		"sfhToolEfforts": {
+			"pi": "",
+			"opencode": "",
+			"codex": "",
+			"claude": ""
+		},
+		"sfhToolAccess": {
+			"pi": "read",
+			"opencode": "read",
+			"codex": "read",
+			"claude": "read"
+		},
+		"sfhIntegrateModel": "",
+		"sfhIntegrateEffort": "",
+		"sfhIntegrateAccess": "read"
+	},
+	"supervisor": {
+		"auto": true,
+		"checkIntervalMinutes": 30,
+		"workerStartThreshold": 6,
+		"maxConsecutiveFailures": 2
+	},
+	"escalation": {
+		"enabled": true,
+		"toolCallThreshold": 20,
+		"distinctPathThreshold": 8,
+		"writeThreshold": 5,
+		"promptLengthThreshold": 400
+	}
+}

@@ -90,25 +90,20 @@ Supervisor は基準を判定根拠にする。**基準にない事項は option
 
 ## インストール
 
-pi パッケージとして:
-
 ```bash
 pi install git:github.com/Aero123421/pi-metaloop
-# またはローカルパス
 pi install /path/to/pi-metaLoop
 ```
 
-`~/.pi/agent/settings.json` に追加してもよい:
+または `~/.pi/agent/settings.json` の `extensions` にパスを追加。
 
-```json
-{ "extensions": ["/path/to/pi-metaLoop"] }
+### 初回セットアップ（skill・明示呼び出し）
+
+```text
+/skill:meta-loop-setup
 ```
 
-インストールなしで試す:
-
-```bash
-pi -e /path/to/pi-metaLoop/src/index.ts
-```
+対話で user/project スコープ、役別モデル、sfh の許可 tool・model/effort/access、standards を決め、`~/.pi/agent/meta-loop/` や `.pi/meta-loop/` に書き出す。
 
 ## 設定
 

@@ -1,0 +1,24 @@
+{
+	"executor": {
+		"sfhAllowedTools": ["pi", "opencode"],
+		"maxParallel": 4,
+		"timeoutSec": 1800,
+		"sfhAccess": "read",
+		"sfhToolAccess": {
+			"pi": "read",
+			"opencode": "read"
+		},
+		"sfhToolModels": {
+			"pi": "",
+			"opencode": ""
+		},
+		"sfhToolEfforts": {
+			"pi": "",
+			"opencode": ""
+		},
+		"sfhIntegrateAccess": "read"
+	},
+	"limits": {
+		"maxTasks": 8
+	}
+}

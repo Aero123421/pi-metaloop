@@ -12,7 +12,7 @@
  * stay lightweight: goal + ticket only.
  */
 import type { MetaLoopConfig } from "./config.ts";
-import { loadStandards, resolveSfhBranchModel, resolveSfhIntegrateModel } from "./config.ts";
+import { loadStandards, resolveSfhBranchAccess, resolveSfhBranchEffort, resolveSfhBranchModel, resolveSfhIntegrateAccess, resolveSfhIntegrateEffort, resolveSfhIntegrateModel, assertSfhToolAllowed } from "./config.ts";
 import { detectSfh, generateFlowYaml, renderBranchPrompt, renderIntegrationPrompt, runSfhFlow, sanitizeId, writeFlowFile, type FlowSpec } from "./sfh-exec.ts";
 import { extractJson, loadRole, runRole } from "./spawn.ts";
 import { checkAutoTriggers, evaluateTriggers, type RuntimeEvent, type SupervisorStats } from "./triggers.ts";
@@ -61,6 +61,8 @@ function toTicket(t: any, i: number, previous?: Ticket): Ticket {
 						id: String(b.id ?? `branch-${j + 1}`),
 						tool: typeof b.tool === "string" ? b.tool : undefined,
 						model: typeof b.model === "string" ? b.model : undefined,
+						effort: typeof b.effort === "string" ? b.effort : undefined,
+						access: typeof b.access === "string" ? b.access : undefined,
 						prompt: String(b.prompt ?? ""),
 					}))
 				: undefined,
@@ -289,19 +291,36 @@ export async function runSupervisedTask(
 
 		{
 			const flowName = `meta-loop-${sanitizeId(ticket.id)}`;
+			// tool allow-list
+			for (const b of branches) {
+				const err = assertSfhToolAllowed(b.tool, config);
+				if (err) {
+					ticket.status = "blocked";
+					ticket.error = err;
+					return;
+				}
+			}
 			const integrateModel = resolveSfhIntegrateModel(config);
 			const defaultModel = config.executor.sfhModel?.trim() || undefined;
+			const defaultEffort = config.executor.sfhEffort?.trim() || undefined;
+			const defaultAccess = config.executor.sfhAccess?.trim() || "read";
 			const spec: FlowSpec = {
 				name: flowName,
 				branches: branches.map((b) => ({
 					id: sanitizeId(b.id),
 					tool: b.tool,
 					model: resolveSfhBranchModel(b, config),
+					effort: resolveSfhBranchEffort(b, config),
+					access: resolveSfhBranchAccess(b, config),
 					prompt: renderBranchPrompt(b, ticket, input.goal),
 				})),
 				integrationPrompt: renderIntegrationPrompt(ticket, input.goal),
 				integrationModel: integrateModel,
+				integrationEffort: resolveSfhIntegrateEffort(config),
+				integrationAccess: resolveSfhIntegrateAccess(config),
 				defaultModel,
+				defaultEffort,
+				defaultAccess,
 				timeoutSec: ex.timeoutSec,
 				maxParallel: ex.maxParallel,
 			};
