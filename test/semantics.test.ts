@@ -134,14 +134,60 @@ describe("finalizeFromEvidence P0 semantics", () => {
 		assert.equal(blockedT.status, "failed");
 	});
 
-	it("exit 0 + claim done → done; exit 0 + claim partial → partial", () => {
+	it("exit 0 + claim done + verify passed → done; exit 0 + claim partial → partial", () => {
 		const doneT = baseTicket({ status: "running" });
-		finalizeFromEvidence(doneT, claim({ claimedStatus: "done" }), evidence({ processExitCode: 0 }));
+		finalizeFromEvidence(
+			doneT,
+			claim({ claimedStatus: "done" }),
+			evidence({ processExitCode: 0, verify: { status: "passed", exitCode: 0 } }),
+		);
 		assert.equal(doneT.status, "done");
 
 		const partT = baseTicket({ status: "running" });
 		finalizeFromEvidence(partT, claim({ claimedStatus: "partial" }), evidence({ processExitCode: 0 }));
 		assert.equal(partT.status, "partial");
+	});
+
+	it("exit 0 + claim done without verify → partial (done forbidden)", () => {
+		const unsetT = baseTicket({ status: "running" });
+		finalizeFromEvidence(
+			unsetT,
+			claim({ claimedStatus: "done" }),
+			evidence({ processExitCode: 0, verify: { status: "unset", reason: "not configured" } }),
+		);
+		assert.equal(unsetT.status, "partial");
+		assert.match(unsetT.error ?? "", /verify|not configured|forbidden/i);
+
+		const missingT = baseTicket({ status: "running" });
+		finalizeFromEvidence(missingT, claim({ claimedStatus: "done" }), evidence({ processExitCode: 0 }));
+		assert.equal(missingT.status, "partial");
+		assert.match(missingT.error ?? "", /verify|forbidden/i);
+	});
+
+	it("exit 0 + claim done + verify failed/timeout → failed", () => {
+		const failedT = baseTicket({ status: "running" });
+		finalizeFromEvidence(
+			failedT,
+			claim({ claimedStatus: "done" }),
+			evidence({
+				processExitCode: 0,
+				verify: { status: "failed", exitCode: 1, reason: "controller verify failed (exit 1): npm test" },
+			}),
+		);
+		assert.equal(failedT.status, "failed");
+		assert.match(failedT.error ?? "", /verify failed/i);
+
+		const timeoutT = baseTicket({ status: "running" });
+		finalizeFromEvidence(
+			timeoutT,
+			claim({ claimedStatus: "done" }),
+			evidence({
+				processExitCode: 0,
+				verify: { status: "timeout", timedOut: true, reason: "controller verify timed out" },
+			}),
+		);
+		assert.equal(timeoutT.status, "failed");
+		assert.match(timeoutT.error ?? "", /timeout|verify/i);
 	});
 
 	it("exit 0 + missing claim status → partial (never silent done)", () => {

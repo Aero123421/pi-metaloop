@@ -40,6 +40,14 @@ export interface ExecutorSettings {
 	sfhIntegrateAccess?: string;
 	/** undefined is unrestricted; [] denies every sfh preset tool. */
 	sfhAllowedTools?: string[];
+	/**
+	 * Controller-side trusted deterministic verify argv lists (no shell).
+	 * Each entry is `[command, ...args]`. Required for native worker `done`.
+	 * undefined/[] → verify unset → done forbidden. Project cannot introduce commands.
+	 */
+	verifyCommands?: string[][];
+	/** Wall-clock budget for the full verify sequence (seconds). */
+	verifyTimeoutSec?: number;
 }
 
 /** Access ceilings captured after base (repo/user/global) layers. Project/ticket cannot raise above these. */
@@ -73,31 +81,69 @@ export interface MetaLoopConfig {
 
 const READ_TOOLS = ["read", "ls", "find", "grep"];
 /**
- * Default Worker tools — interceptable built-ins only.
- * bash is never granted to scoped native workers: shell parsing cannot prove scope,
- * and build/test verification is the controller's trusted deterministic path.
+ * Strict native Worker built-in allowlist — interceptable by scope-guard only.
+ * bash and any custom/extension tool names are never granted.
+ * Build/test verification is the controller's trusted deterministic path.
  */
-const WORKER_TOOLS = ["read", "write", "edit", "ls", "find", "grep"];
+const WORKER_TOOLS = ["read", "write", "edit", "ls", "find", "grep"] as const;
+const WORKER_TOOL_ALLOWLIST = new Set<string>(WORKER_TOOLS);
 
-/** Tools that must never appear on a scoped native Worker's effective Pi tool list. */
-const NATIVE_WORKER_DENIED_TOOLS = new Set(["bash"]);
+/** Default wall-clock for controller verify when unset (seconds). */
+export const DEFAULT_VERIFY_TIMEOUT_SEC = 600;
 
 /**
  * Effective Pi tools for a native implementation worker.
- * Always strips bash (and any future denied shell tools) even when alias/args/config request them.
- * `undefined` → default interceptable built-ins; `[]` stays deny-all.
+ * Strict intersection with WORKER_TOOLS — drops bash and any non-built-in names
+ * even when alias/args/config request them. `undefined` → full allowlist; `[]` stays deny-all.
  */
 export function effectiveNativeWorkerTools(tools?: string[]): string[] {
 	const base = tools === undefined ? [...WORKER_TOOLS] : tools.map(String);
-	return base.filter((t) => !NATIVE_WORKER_DENIED_TOOLS.has(t.trim().toLowerCase()));
+	return base.filter((t) => WORKER_TOOL_ALLOWLIST.has(t.trim().toLowerCase()));
 }
 
-/** Non-null when a tool list still requests a denied worker tool (plan/execute reject path). */
+/** Non-null when a tool list requests anything outside the strict built-in allowlist. */
 export function nativeWorkerToolsDenial(tools?: string[]): string | null {
 	if (!tools?.length) return null;
-	const denied = tools.map(String).filter((t) => NATIVE_WORKER_DENIED_TOOLS.has(t.trim().toLowerCase()));
-	if (!denied.length) return null;
-	return `native worker tools must not include ${[...new Set(denied)].join(", ")} (interceptable built-ins only; build/test is controller-side verify)`;
+	const rejected = [
+		...new Set(
+			tools
+				.map(String)
+				.map((t) => t.trim())
+				.filter((t) => t && !WORKER_TOOL_ALLOWLIST.has(t.toLowerCase())),
+		),
+	];
+	if (!rejected.length) return null;
+	return `native worker tools must be interceptable built-ins only (${WORKER_TOOLS.join(", ")}); rejected: ${rejected.join(", ")}`;
+}
+
+/** Normalize executor.verifyCommands; invalid entries dropped. */
+export function normalizeVerifyCommands(raw: unknown): string[][] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const out: string[][] = [];
+	for (const entry of raw) {
+		if (!Array.isArray(entry) || entry.length === 0) continue;
+		const argv = entry.map((x) => String(x)).filter((s) => s.length > 0);
+		if (!argv.length) continue;
+		// Reject shell metacharacters in the executable token — no shell is used, but fail closed on odd paths.
+		if (/[\n\r|&;<>()$`]/.test(argv[0])) continue;
+		out.push(argv);
+	}
+	return out;
+}
+
+function verifyCommandKey(argv: string[]): string {
+	return JSON.stringify(argv);
+}
+
+/** Project may only keep a subset of base verify commands — never introduce new ones. */
+function narrowVerifyCommands(
+	ceiling: string[][] | undefined,
+	request: string[][] | undefined,
+): string[][] | undefined {
+	if (request === undefined) return ceiling;
+	if (!ceiling?.length) return []; // project cannot introduce when base has none
+	const allowed = new Set(ceiling.map(verifyCommandKey));
+	return request.filter((argv) => allowed.has(verifyCommandKey(argv)));
 }
 
 const defaultConfig: MetaLoopConfig = {
@@ -127,6 +173,9 @@ const defaultConfig: MetaLoopConfig = {
 		sfhAccess: "read",
 		sfhToolAccess: {},
 		sfhIntegrateAccess: "read",
+		// unset → native done forbidden until user/base configures trusted verify
+		verifyCommands: undefined,
+		verifyTimeoutSec: DEFAULT_VERIFY_TIMEOUT_SEC,
 	},
 	escalation: { ...defaultEscalation },
 	limits: {
@@ -266,7 +315,10 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 		const ex = layer.executor as any;
 		const cur = merged.executor;
 		if (kind === "project") {
-			// project cannot change binary or expand access/tools
+			// project cannot change binary or expand access/tools/verify
+			const projectVerify = Array.isArray(ex.verifyCommands)
+				? normalizeVerifyCommands(ex.verifyCommands)
+				: undefined;
 			merged.executor = {
 				...cur,
 				sfhEnabled: ex.sfhEnabled === false ? false : cur.sfhEnabled,
@@ -294,8 +346,16 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 				sfhToolAccess: mergeAccessMap(cur.sfhToolAccess, ex.sfhToolAccess, cur.sfhAccess),
 				// sfhBinary intentionally not overridable by project
 				sfhBinary: cur.sfhBinary,
+				verifyCommands: narrowVerifyCommands(cur.verifyCommands, projectVerify),
+				verifyTimeoutSec: Math.min(
+					cur.verifyTimeoutSec ?? DEFAULT_VERIFY_TIMEOUT_SEC,
+					clampInt(ex.verifyTimeoutSec ?? cur.verifyTimeoutSec ?? DEFAULT_VERIFY_TIMEOUT_SEC, 5, 86_400),
+				),
 			};
 		} else {
+			const baseVerify = Array.isArray(ex.verifyCommands)
+				? normalizeVerifyCommands(ex.verifyCommands)
+				: cur.verifyCommands;
 			merged.executor = {
 				...cur,
 				...ex,
@@ -303,6 +363,11 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 				sfhToolEfforts: { ...(cur.sfhToolEfforts ?? {}), ...(ex.sfhToolEfforts && typeof ex.sfhToolEfforts === "object" ? ex.sfhToolEfforts : {}) },
 				sfhToolAccess: { ...(cur.sfhToolAccess ?? {}), ...(ex.sfhToolAccess && typeof ex.sfhToolAccess === "object" ? ex.sfhToolAccess : {}) },
 				sfhAllowedTools: Array.isArray(ex.sfhAllowedTools) ? ex.sfhAllowedTools.map(String) : cur.sfhAllowedTools,
+				verifyCommands: baseVerify === undefined ? cur.verifyCommands : baseVerify,
+				verifyTimeoutSec:
+					ex.verifyTimeoutSec === undefined
+						? cur.verifyTimeoutSec
+						: clampInt(ex.verifyTimeoutSec, 5, 86_400),
 			};
 		}
 	}
@@ -362,6 +427,11 @@ function cloneDefault(): MetaLoopConfig {
 				defaultConfig.executor.sfhAllowedTools === undefined
 					? undefined
 					: [...defaultConfig.executor.sfhAllowedTools],
+			verifyCommands:
+				defaultConfig.executor.verifyCommands === undefined
+					? undefined
+					: defaultConfig.executor.verifyCommands.map((c) => [...c]),
+			verifyTimeoutSec: defaultConfig.executor.verifyTimeoutSec,
 		},
 		escalation: { ...defaultConfig.escalation },
 		limits: { ...defaultConfig.limits },

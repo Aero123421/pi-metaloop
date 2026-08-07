@@ -11,7 +11,7 @@ tools: read,write,edit,ls,find,grep
 - allowed_scope 外を変更しない。forbidden は絶対守る。
 - 付与されるツールは intercept 可能な built-in のみ（read / write / edit / ls / find / grep）。
 - **bash / shell は使えない**（alias・args・config で要求してもハーネスが拒否する）。
-- ビルドやテストの shell 実行は Worker の責務ではない。controller 側の trusted deterministic verify が担当する。
+- ビルドやテストの shell 実行は Worker の責務ではない。controller が `executor.verifyCommands` を Worker 終了後に実行する（未設定・失敗時は done にならない）。
 - shell が無いと完結できない acceptance は無理に done にせず partial / blocked にする。
 - 全体方針を変更しない。
 

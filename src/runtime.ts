@@ -40,6 +40,7 @@ import {
 } from "./sfh-exec.ts";
 import { extractJson, loadRole, runRole } from "./spawn.ts";
 import { checkAutoTriggers, evaluateTriggers, type RuntimeEvent, type SupervisorStats } from "./triggers.ts";
+import { runControllerVerify, unsetVerifyEvidence, verifyAllowsDone } from "./verify.ts";
 import type {
 	BoardPhase,
 	ExecutionEvidence,
@@ -47,6 +48,7 @@ import type {
 	TaskBoard,
 	Ticket,
 	Verdict,
+	VerifyEvidence,
 	WorkerClaim,
 	RoleRunResult,
 } from "./types.ts";
@@ -481,10 +483,35 @@ export function finalizeFromEvidence(ticket: Ticket, claim: WorkerClaim, evidenc
 		ticket.error = detail;
 		return;
 	}
-	if (claim.claimedStatus === "done") ticket.status = "done";
-	else if (claim.claimedStatus === "partial") ticket.status = "partial";
+	if (claim.claimedStatus === "done") {
+		// Done requires controller-side trusted verify (model-independent). Unset/fail/timeout ⇒ not done.
+		if (!verifyAllowsDone(evidence.verify)) {
+			const v = evidence.verify;
+			const status = v?.status ?? "unset";
+			if (status === "unset") {
+				ticket.status = "partial";
+				ticket.error =
+					v?.reason ??
+					"controller trusted verify not configured; done is forbidden without deterministic verify";
+			} else {
+				ticket.status = "failed";
+				ticket.error =
+					v?.reason ?? `controller trusted verify ${status}; done is forbidden`;
+			}
+			return;
+		}
+		ticket.status = "done";
+		return;
+	}
+	if (claim.claimedStatus === "partial") ticket.status = "partial";
 	else if (claim.claimedStatus === "blocked") ticket.status = "blocked";
 	else ticket.status = "partial";
+}
+
+/** Attach unset verify when the native path never reached the controller verifier. */
+export function ensureVerifyEvidence(evidence: ExecutionEvidence, verify?: VerifyEvidence): ExecutionEvidence {
+	if (evidence.verify) return evidence;
+	return { ...evidence, verify: verify ?? unsetVerifyEvidence() };
 }
 
 function maxAccessLevel(...levels: string[]): string {
@@ -1272,8 +1299,8 @@ export async function runSupervisedTask(
 				"Execute this ticket only. Stay inside allowed_scope. End with the required JSON report.",
 				"",
 				"Tools: interceptable built-ins only (read/write/edit/ls/find/grep). bash/shell is NOT available",
-				"and cannot be enabled via alias, args, or config. Do not claim shell build/test runs —",
-				"controller-side trusted deterministic verify owns build/test.",
+				"and cannot be enabled via alias, args, config, or extensions. Do not claim shell build/test runs —",
+				"controller-side trusted deterministic verify (executor.verifyCommands) owns build/test after you finish.",
 				"",
 				"Git state mutation is forbidden: do NOT git commit, push, branch switch/checkout, reset, stash,",
 				"rebase, merge, or otherwise change HEAD/branch/index state. Worktree edits inside allowed_scope only.",
@@ -1286,9 +1313,8 @@ export async function runSupervisedTask(
 				`## User request\n${input.goal}`,
 			].join("\n");
 
-			// Native implementation workers always receive the fail-closed guard. The
-			// pre/post filesystem monitor is independent of git so ignored files and
-			// cwd-parent writes cannot disappear from ticket evidence.
+			// Native implementation workers: scope-guard only (--no-extensions), strict built-in
+			// tools, then controller-side trusted verify. FS monitor covers ignored/parent writes.
 			const beforeFs = captureFilesystemSnapshot(cwd);
 			const beforeGit = captureGitSnapshot(cwd);
 			const preError = !beforeFs.ok
@@ -1299,7 +1325,12 @@ export async function runSupervisedTask(
 			if (preError) {
 				ticket.status = "failed";
 				ticket.error = preError;
-				ticket.evidence = { processExitCode: 1, actualChangedFiles: [], scopeViolations: [] };
+				ticket.evidence = {
+					processExitCode: 1,
+					actualChangedFiles: [],
+					scopeViolations: [],
+					verify: unsetVerifyEvidence("skipped: pre-evidence failed"),
+				};
 			} else {
 				const run = await runRole(worker, workerTask, {
 					cwd,
@@ -1307,7 +1338,8 @@ export async function runSupervisedTask(
 					timeoutSec: workerTimeoutSec,
 					outputCap: cap,
 					onProgress: hooks.onActivity,
-					extraArgs: ["-e", scopeGuardPath()],
+					// Discovery off; only the harness scope-guard extension is loaded.
+					extraArgs: ["--no-extensions", "-e", scopeGuardPath()],
 					extraEnv: {
 						PI_META_LOOP_ALLOWED_SCOPE: JSON.stringify(ticket.allowed_scope ?? []),
 						PI_META_LOOP_FORBIDDEN: JSON.stringify(ticket.forbidden ?? []),
@@ -1331,9 +1363,32 @@ export async function runSupervisedTask(
 					ticket.status = "failed";
 					ticket.error = fatalError;
 					ticket.claim = claim;
-					ticket.evidence = evidence;
+					ticket.evidence = {
+						...evidence,
+						verify: unsetVerifyEvidence("skipped: fatal evidence error"),
+					};
 				} else {
-					finalizeFromEvidence(ticket, claim, evidence);
+					// Controller verify is model-independent and required before done.
+					// Skip only when the worker process already failed or scope broke — still record unset/skip.
+					const shouldVerify =
+						run.exitCode === 0 &&
+						evidence.scopeViolations.length === 0 &&
+						!hooks.signal?.aborted;
+					const verify = shouldVerify
+						? await runControllerVerify({
+								commands: config.executor.verifyCommands,
+								cwd,
+								timeoutSec: config.executor.verifyTimeoutSec,
+								signal: hooks.signal,
+						  })
+						: unsetVerifyEvidence(
+								run.exitCode !== 0
+									? "skipped: worker process exit non-zero"
+									: evidence.scopeViolations.length
+										? "skipped: scope violations"
+										: "skipped: aborted",
+						  );
+					finalizeFromEvidence(ticket, claim, { ...evidence, verify });
 				}
 			}
 		}

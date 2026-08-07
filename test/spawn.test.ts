@@ -53,14 +53,27 @@ describe("spawn argv (ENAMETOOLONG guard)", () => {
 		assert.ok(!argv.includes("--no-tools"));
 	});
 
-	it("loadRole strips bash from worker tools even when config requests it", () => {
-		const loaded = loadRole("worker", { tools: ["read", "write", "edit", "bash", "grep"] });
+	it("loadRole intersects worker tools with strict built-in allowlist (drops bash/custom)", () => {
+		const loaded = loadRole("worker", {
+			tools: ["read", "write", "edit", "bash", "grep", "my_custom_write"],
+		});
 		assert.deepEqual(loaded.tools, ["read", "write", "edit", "grep"]);
-		const argv = buildRoleArgv(loaded, "C:/tmp/prompt.md");
+		const argv = buildRoleArgv(loaded, "C:/tmp/prompt.md", [
+			"--no-extensions",
+			"-e",
+			"C:/tmp/scope-guard.ts",
+		]);
 		const index = argv.indexOf("--tools");
 		assert.ok(index >= 0);
 		assert.equal(argv[index + 1], "read,write,edit,grep");
 		assert.ok(!String(argv[index + 1]).includes("bash"));
+		assert.ok(!String(argv[index + 1]).includes("my_custom"));
+		// Production native worker path: discovery off + explicit scope-guard only.
+		assert.ok(argv.includes("--no-extensions"));
+		const eIdx = argv.indexOf("-e");
+		assert.ok(eIdx >= 0);
+		assert.equal(argv[eIdx + 1], "C:/tmp/scope-guard.ts");
+		assert.ok(argv.indexOf("--no-extensions") < eIdx);
 	});
 
 	it("keeps command line well under Windows limit even with huge conceptual task", () => {

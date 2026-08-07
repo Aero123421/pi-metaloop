@@ -47,5 +47,5 @@
 		"concurrency": 1,
 		"perTaskOutputCap": 51200
 	},
-	"notes": "0.2.6: Orchestrator/Supervisor/Worker have no bash. Native workers use interceptable built-ins only; build/test is controller-side verify. sfh is read-only review without an OS sandbox (write/full refused). Project config cannot expand past user ceiling."
+	"notes": "0.2.6: Native workers = strict built-ins + --no-extensions + scope-guard; done requires executor.verifyCommands (controller trusted verify). sfh read-only without OS sandbox. Project cannot expand past user ceiling or introduce verify commands."
 }

@@ -48,11 +48,26 @@ export interface WorkerClaim {
 	raw?: string;
 }
 
+/** Controller-side trusted verify outcome (model-independent). */
+export type VerifyStatus = "passed" | "failed" | "timeout" | "unset" | "error" | "aborted";
+
+export interface VerifyEvidence {
+	status: VerifyStatus;
+	/** argv lists that were configured / attempted */
+	commands?: string[][];
+	exitCode?: number;
+	timedOut?: boolean;
+	output?: string;
+	reason?: string;
+}
+
 export interface ExecutionEvidence {
 	processExitCode: number;
 	actualChangedFiles: string[];
 	scopeViolations: string[];
 	claimedStatus?: string;
+	/** Present on native implementation tickets after controller verify gate. */
+	verify?: VerifyEvidence;
 }
 
 export interface Ticket {

@@ -15,8 +15,8 @@
 | sfh group | **read-only review**（OS sandbox なしでは write/full を実行・done にしない） |
 
 Project config は user/default の能力を**狭めるだけ**（sfhBinary 変更・access 引き上げ・allowlist 拡大は不可）。
-Native Worker の effective tools から bash は常に除外され、tool_call guard も bash を無条件拒否する。
-ビルド/テストは controller 側の trusted deterministic verify が担当する。
+Native Worker の effective tools は `WORKER_TOOLS` 厳密 allowlist 交差。`--no-extensions` + scope-guard のみロード。tool_call guard も bash を無条件拒否。
+ビルド/テストは `executor.verifyCommands` による controller 側 trusted deterministic verify（未設定・失敗・timeout 時は done 禁止）。
 
 ## 監査
 
@@ -27,7 +27,7 @@ Native Worker の effective tools から bash は常に除外され、tool_call 
 
 ## 完了判定
 
-WorkerClaim（自己申告）と ExecutionEvidence（exit + git + scope）を分離し、ハーネスが最終 status を決める。
+WorkerClaim（自己申告）と ExecutionEvidence（exit + git + scope + controller verify）を分離し、ハーネスが最終 status を決める。native `done` は verify.passed 必須。
 
 ## 設定
 

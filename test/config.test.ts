@@ -66,9 +66,30 @@ describe("role tool ceilings", () => {
 		]);
 		assert.deepEqual(baseOnly.roles.worker.tools, ["read", "write"]);
 
-		assert.deepEqual(effectiveNativeWorkerTools(["bash", "read", "BASH"]), ["read"]);
+		assert.deepEqual(effectiveNativeWorkerTools(["bash", "read", "BASH", "my_write"]), ["read"]);
 		assert.match(nativeWorkerToolsDenial(["read", "bash"]) ?? "", /bash/i);
+		assert.match(nativeWorkerToolsDenial(["read", "custom_tool"]) ?? "", /custom_tool/i);
 		assert.equal(nativeWorkerToolsDenial(["read", "edit"]), null);
+	});
+
+	it("project cannot introduce verifyCommands; base commands can be narrowed only", () => {
+		const introduced = buildConfigFromLayers(
+			[],
+			[executorLayer({ verifyCommands: [["npm", "test"]] })],
+		);
+		assert.deepEqual(introduced.executor.verifyCommands, []);
+
+		const narrowed = buildConfigFromLayers(
+			[executorLayer({ verifyCommands: [["npm", "test"], ["npx", "tsc", "--noEmit"]] })],
+			[executorLayer({ verifyCommands: [["npm", "test"], ["evil", "pwn"]] })],
+		);
+		assert.deepEqual(narrowed.executor.verifyCommands, [["npm", "test"]]);
+
+		const base = buildConfigFromLayers([
+			executorLayer({ verifyCommands: [["node", "--test"]], verifyTimeoutSec: 120 }),
+		]);
+		assert.deepEqual(base.executor.verifyCommands, [["node", "--test"]]);
+		assert.equal(base.executor.verifyTimeoutSec, 120);
 	});
 });
 

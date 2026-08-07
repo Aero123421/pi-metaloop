@@ -22,7 +22,7 @@ Later layers win. `sfhToolModels` / `sfhToolEfforts` / `sfhToolAccess` are deep-
 
 Empty `model` = inherit pi default. Used for **pi subprocesses** (Orchestrator / Supervisor / Worker).
 
-**bash is never granted** to scoped native workers. Listing `bash` in config/alias/args is stripped at load and blocked by the production tool_call guard. Workers use interceptable built-ins only; build/test is controller-side trusted verify.
+**Strict built-in allowlist** for scoped native workers (`read,write,edit,ls,find,grep`). bash/custom tool names are stripped; production tool_call guard blocks bash. Workers launch with `--no-extensions` and only the harness scope-guard extension. Build/test is `executor.verifyCommands` (controller-side).
 
 ## executor（sfh）
 
@@ -45,9 +45,18 @@ Empty `model` = inherit pi default. Used for **pi subprocesses** (Orchestrator /
 
   "sfhIntegrateModel": "",
   "sfhIntegrateEffort": "",
-  "sfhIntegrateAccess": "read"
+  "sfhIntegrateAccess": "read",
+
+  "verifyCommands": [["npm", "test"], ["npx", "tsc", "--noEmit"]],
+  "verifyTimeoutSec": 600
 }
 ```
+
+### verifyCommands (native done gate)
+
+- Argv lists only (`[command, ...args]`); **no shell**. Controller runs them after the Worker with `shell:false`.
+- **Required for native ticket `done`**. Unset / empty / non-zero exit / timeout → done forbidden (`evidence.verify`).
+- Set in **user/base** config. Project may only keep a subset or lower `verifyTimeoutSec` — cannot introduce new commands.
 
 ### Branch field resolution
 

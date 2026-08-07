@@ -251,8 +251,8 @@ npm run typecheck    # tsc --noEmit (strict)
 ## Security (alpha)
 
 - Orchestrator / Supervisor / Worker default tools include **no bash**.
-- Worker tools are interceptable built-ins only (`read`/`write`/`edit`/`ls`/`find`/`grep`). `allowed_scope` is enforced on write/edit **and** checked after run via git + filesystem evidence. bash requested via alias/args/config is stripped and blocked at the tool_call gate.
-- Build/test shell execution is **not** a Worker duty — controller-side trusted deterministic verify owns it.
+- Worker tools are a **strict built-in allowlist** (`read`/`write`/`edit`/`ls`/`find`/`grep`). Native workers start with `--no-extensions -e scope-guard` so project/user extensions cannot override tools. `allowed_scope` is enforced on write/edit **and** checked after run via git + filesystem evidence. bash/custom tools from alias/args/config are stripped and bash is blocked at the tool_call gate.
+- Build/test is **controller-side trusted deterministic verify** (`executor.verifyCommands` argv lists, no shell). Unset, failed, or timed-out verify **forbids** native `done` (recorded on `evidence.verify`).
 - sfh parallel groups are **read-only review** without an OS sandbox. `write`/`full` is refused at plan/execute (not marked done via post-hoc evidence alone).
 - Project config may only **narrow** capabilities relative to user/defaults (cannot raise sfh access, swap sfhBinary, or expand tool allow-lists past the user ceiling).
 - Project `standards.md` is treated as **untrusted criteria data** in prompts.
