@@ -99,6 +99,31 @@ describe("board-store", () => {
 		assert.equal(c.total, 2);
 	});
 
+	it("rejects symlink/junction components under .pi/meta-loop/runs (path traversal)", () => {
+		const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ml-board-sym-"));
+		const cwd = path.join(parent, "repo");
+		const outside = path.join(parent, "outside");
+		fs.mkdirSync(cwd, { recursive: true });
+		fs.mkdirSync(outside, { recursive: true });
+
+		const meta = path.join(cwd, ".pi", "meta-loop");
+		fs.mkdirSync(meta, { recursive: true });
+		const runsLink = path.join(meta, "runs");
+		// Windows: junction; POSIX: directory symlink. Both must be rejected.
+		const linkType = process.platform === "win32" ? "junction" : "dir";
+		fs.symlinkSync(outside, runsLink, linkType);
+
+		const runId = createRunId();
+		assert.throws(() => writeRun(cwd, sampleRun(cwd, runId)), /symlink|junction|escape/i);
+		assert.equal(fs.existsSync(path.join(outside, runId)), false);
+		assert.equal(fs.existsSync(path.join(outside, "latest.json")), false);
+
+		const lock = acquireOwnerLock(cwd, { runId });
+		assert.equal(lock.ok, false);
+		if (!lock.ok) assert.match(lock.reason, /meta_loop_path_unsafe|symlink|junction/i);
+		assert.equal(fs.existsSync(path.join(outside, "owner.lock.json")), false);
+	});
+
 	it("rejects invalid runIds (path traversal / separators) fail-closed", () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ml-board-bad-"));
 		const badIds = [

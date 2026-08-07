@@ -11,6 +11,7 @@ import {
 	parseInitialPlanRun,
 	resolveTerminalPhase,
 	sfhStatusFromResult,
+	sfhWriteRequiresAllowedScope,
 	validateTicket,
 } from "../src/runtime.ts";
 import { runStatusFromPhase } from "../src/board-store.ts";
@@ -176,7 +177,7 @@ describe("validateTicket allowed_scope fail-closed", () => {
 		assert.match(err!, /native implementation ticket requires non-empty allowed_scope/);
 	});
 
-	it("sfh ticket may omit allowed_scope when branches+integration present", () => {
+	it("sfh ticket may omit allowed_scope when branches+integration present (read path)", () => {
 		const err = validateTicket(
 			baseTicket({
 				execution: "sfh",
@@ -186,6 +187,28 @@ describe("validateTicket allowed_scope fail-closed", () => {
 			}),
 		);
 		assert.equal(err, null);
+	});
+
+	it("sfh ticket with explicit write/full branch.access requires non-empty allowed_scope", () => {
+		for (const access of ["write", "full"] as const) {
+			const err = validateTicket(
+				baseTicket({
+					execution: "sfh",
+					allowed_scope: [],
+					branches: [{ id: "a", prompt: "work", access }],
+					integration: { acceptance: ["merged"] },
+				}),
+			);
+			assert.ok(err, access);
+			assert.match(err!, /allowed_scope/i, access);
+		}
+	});
+
+	it("sfhWriteRequiresAllowedScope blocks config-resolved write/full with empty scope", () => {
+		assert.ok(sfhWriteRequiresAllowedScope("write", []));
+		assert.ok(sfhWriteRequiresAllowedScope("full", undefined));
+		assert.equal(sfhWriteRequiresAllowedScope("read", []), null);
+		assert.equal(sfhWriteRequiresAllowedScope("write", ["src/**"]), null);
 	});
 });
 

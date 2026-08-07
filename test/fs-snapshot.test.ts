@@ -211,7 +211,7 @@ describe("implementation-worker bash inspection", () => {
 		assert.equal(inspect("printf ok > ../escaped.txt").ok, false);
 		assert.equal(inspect("printf ok | tee src/generated.ts").ok, true);
 		assert.equal(inspect("printf ok | tee ../escaped.txt").ok, false);
-		assert.equal(inspect("tool 2>&1").ok, true);
+		assert.equal(inspect("printf ok 2>&1").ok, true);
 		assert.equal(inspect("printf ok > $TARGET").ok, false);
 	});
 
@@ -222,8 +222,9 @@ describe("implementation-worker bash inspection", () => {
 		assert.equal(inspect("python -c \"open('../x','w').write('x')\"").ok, false);
 		assert.equal(inspect("python3.12 -c \"open('../x','w').write('x')\"").ok, false);
 		assert.equal(inspect("echo $(git commit -m x)").ok, false);
-		assert.equal(inspect("node --test test/unit.test.js").ok, true);
+		assert.equal(inspect("node --test test/unit.test.js").ok, false);
 		assert.equal(inspect("python scripts/check.py").ok, false);
+		assert.equal(inspect("touch ../../escaped").ok, false);
 	});
 
 	it("rejects an empty native allowed_scope", () => {

@@ -7,6 +7,7 @@ import {
 	formatBoardForSupervisor,
 	buildPrimarySummary,
 	resolveTerminalPhase,
+	sfhWriteRequiresAllowedScope,
 } from "../src/runtime.ts";
 import { runElapsed, runStatusFromPhase } from "../src/board-store.ts";
 import { generateFlowYaml } from "../src/sfh-exec.ts";
@@ -67,6 +68,20 @@ describe("ticket validation", () => {
 			}),
 		);
 		assert.equal(err, null);
+	});
+	it("rejects sfh write/full without allowed_scope at plan and execute gates", () => {
+		const err = validateTicket(
+			baseTicket({
+				execution: "sfh",
+				allowed_scope: [],
+				branches: [{ id: "a", prompt: "x", access: "write" }],
+				integration: { acceptance: ["ok"] },
+			}),
+		);
+		assert.ok(err);
+		assert.match(err!, /allowed_scope/);
+		assert.ok(sfhWriteRequiresAllowedScope("full", []));
+		assert.equal(sfhWriteRequiresAllowedScope("full", ["src/**"]), null);
 	});
 	// P0 fail-closed: empty write scope must not run as native implementation work
 	it("rejects native ticket with empty allowed_scope", () => {

@@ -141,6 +141,7 @@ export function writeArtifact(cwd: string, runId: string, name: string, content:
 		const dir = ensureRunDir(cwd, runId);
 		const file = path.join(dir, name);
 		atomicWriteFile(file, content);
+		assertWrittenPathInsideCwd(cwd, file);
 		return file;
 	} catch {
 		return null;
@@ -184,6 +185,107 @@ function runsRoot(cwd: string): string {
 	return path.join(cwd, ".pi", "meta-loop", "runs");
 }
 
+function pathKey(p: string): string {
+	const n = path.normalize(p);
+	return process.platform === "win32" ? n.toLowerCase() : n;
+}
+
+function isPathInside(root: string, target: string): boolean {
+	const rootN = path.normalize(root);
+	const targetN = path.normalize(target);
+	if (pathKey(rootN) === pathKey(targetN)) return true;
+	const prefix = rootN.endsWith(path.sep) ? rootN : rootN + path.sep;
+	return pathKey(targetN).startsWith(pathKey(prefix));
+}
+
+function canonicalRealpath(p: string): string {
+	return path.normalize(fs.realpathSync(p));
+}
+
+/** Reject symlink/junction components so board writes cannot leave the project cwd. */
+function assertNotSymlink(absPath: string): fs.Stats {
+	const st = fs.lstatSync(absPath);
+	if (st.isSymbolicLink()) {
+		throw new Error(`symlink/junction rejected in meta-loop path: ${absPath}`);
+	}
+	return st;
+}
+
+function resolveCanonicalCwd(cwd: string): string {
+	const abs = path.resolve(cwd);
+	const st = assertNotSymlink(abs);
+	if (!st.isDirectory()) {
+		throw new Error(`cwd is not a directory: ${abs}`);
+	}
+	return canonicalRealpath(abs);
+}
+
+/**
+ * Create/validate a real directory chain under cwd. Each existing component is
+ * lstat'd (symlink/junction → fail closed). After creation, realpath must stay
+ * inside the canonical project cwd.
+ */
+function ensureSafeDirectoryChain(cwd: string, segments: string[]): string {
+	const cwdReal = resolveCanonicalCwd(cwd);
+	let current = cwdReal;
+	for (const segment of segments) {
+		if (
+			!segment ||
+			segment === "." ||
+			segment === ".." ||
+			segment.includes("/") ||
+			segment.includes("\\") ||
+			segment.includes("\0") ||
+			(segment.includes(path.sep) && path.sep !== "/" && path.sep !== "\\")
+		) {
+			throw new Error(`invalid meta-loop path segment: ${JSON.stringify(segment)}`);
+		}
+		const next = path.join(current, segment);
+		if (fs.existsSync(next)) {
+			const st = assertNotSymlink(next);
+			if (!st.isDirectory()) {
+				throw new Error(`meta-loop path component is not a directory: ${next}`);
+			}
+		} else {
+			fs.mkdirSync(next, { recursive: false });
+			assertNotSymlink(next);
+		}
+		current = canonicalRealpath(next);
+		if (!isPathInside(cwdReal, current)) {
+			throw new Error(`meta-loop path escapes project cwd: ${current}`);
+		}
+	}
+	return current;
+}
+
+function ensureMetaLoopRunsRoot(cwd: string): string {
+	return ensureSafeDirectoryChain(cwd, [".pi", "meta-loop", "runs"]);
+}
+
+/** After a write, confirm the resulting real path remains under canonical cwd. */
+function assertWrittenPathInsideCwd(cwd: string, filePath: string): void {
+	const cwdReal = resolveCanonicalCwd(cwd);
+	const abs = path.resolve(filePath);
+	// Walk existing parents and reject symlink components (TOCTOU residual check).
+	let cursor = abs;
+	const seen: string[] = [];
+	while (pathKey(cursor) !== pathKey(path.parse(cursor).root) && cursor !== path.dirname(cursor)) {
+		seen.push(cursor);
+		cursor = path.dirname(cursor);
+		if (isPathInside(cwdReal, cursor) || pathKey(cursor) === pathKey(cwdReal)) break;
+	}
+	for (const p of seen.reverse()) {
+		if (!fs.existsSync(p)) continue;
+		assertNotSymlink(p);
+	}
+	const real = fs.existsSync(abs)
+		? canonicalRealpath(abs)
+		: path.join(canonicalRealpath(path.dirname(abs)), path.basename(abs));
+	if (!isPathInside(cwdReal, real)) {
+		throw new Error(`meta-loop write escaped project cwd: ${real}`);
+	}
+}
+
 function assertRunIdContained(cwd: string, runId: string): string {
 	if (!isValidRunId(runId)) {
 		throw new Error(`Invalid runId (fail closed): ${JSON.stringify(runId)}`);
@@ -212,9 +314,12 @@ export function createRunId(): string {
 }
 
 export function ensureRunDir(cwd: string, runId: string): string {
-	const dir = runDir(cwd, runId);
-	fs.mkdirSync(dir, { recursive: true });
-	return dir;
+	if (!isValidRunId(runId)) {
+		throw new Error(`Invalid runId (fail closed): ${JSON.stringify(runId)}`);
+	}
+	// Validate lexical containment first, then create a symlink-free real chain.
+	assertRunIdContained(cwd, runId);
+	return ensureSafeDirectoryChain(cwd, [".pi", "meta-loop", "runs", runId]);
 }
 
 /**
@@ -266,15 +371,22 @@ export function writeRun(cwd: string, run: PersistedRun): void {
 		throw new Error(`Invalid runId (fail closed): ${JSON.stringify(run.runId)}`);
 	}
 	const dir = ensureRunDir(cwd, run.runId);
+	const root = ensureMetaLoopRunsRoot(cwd);
 	const payload = { ...run, updatedAt: new Date().toISOString() };
-	atomicWriteFile(path.join(dir, "board.json"), JSON.stringify(payload, null, 2));
+	const boardPath = path.join(dir, "board.json");
+	atomicWriteFile(boardPath, JSON.stringify(payload, null, 2));
+	assertWrittenPathInsideCwd(cwd, boardPath);
 	// Pointer for latest run (Windows-safe; no symlink)
+	const latestPath = path.join(root, LATEST_NAME);
 	atomicWriteFile(
-		path.join(runsRoot(cwd), LATEST_NAME),
+		latestPath,
 		JSON.stringify({ runId: run.runId, updatedAt: payload.updatedAt }, null, 2),
 	);
+	assertWrittenPathInsideCwd(cwd, latestPath);
 	if (payload.summary) {
-		atomicWriteFile(path.join(dir, "summary.md"), payload.summary);
+		const summaryPath = path.join(dir, "summary.md");
+		atomicWriteFile(summaryPath, payload.summary);
+		assertWrittenPathInsideCwd(cwd, summaryPath);
 	}
 }
 
@@ -934,9 +1046,17 @@ export function acquireOwnerLock(
 			? opts.leaseSec
 			: DEFAULT_LEASE_SEC;
 	const force = opts.force === true;
-	const root = runsRoot(cwd);
-	fs.mkdirSync(root, { recursive: true });
-	const lockPath = ownerLockPath(cwd);
+	let root: string;
+	try {
+		root = ensureMetaLoopRunsRoot(cwd);
+	} catch (err) {
+		return {
+			ok: false,
+			holder: null,
+			reason: `meta_loop_path_unsafe: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
+	const lockPath = path.join(root, OWNER_LOCK_NAME);
 	const generation = randomUUID();
 
 	// A failed generation-guard attempt means another operation is completing.
@@ -1050,6 +1170,7 @@ function buildLockHandle(cwd: string, ownership: OwnerLockHolder): Extract<Owner
 					heartbeatAt: new Date().toISOString(),
 				};
 				atomicWriteFile(lockPath, JSON.stringify(next, null, 2));
+				assertWrittenPathInsideCwd(cwd, lockPath);
 			} catch {
 				/* best-effort heartbeat */
 			} finally {

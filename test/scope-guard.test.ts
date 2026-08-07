@@ -17,8 +17,8 @@ describe("implementation-worker detached write guard", () => {
 			assert.equal(result.ok, false, command);
 			assert.match(result.reason ?? "", /background|detach/i, command);
 		}
-		assert.equal(inspect("tool 2>&1").ok, true);
-		assert.equal(inspect("tool >&2").ok, true);
+		assert.equal(inspect("printf ok 2>&1").ok, true);
+		assert.equal(inspect("printf ok >&2").ok, true);
 		assert.equal(inspect("printf '&' > src/literal.txt").ok, true);
 	});
 
@@ -70,14 +70,30 @@ describe("implementation-worker detached write guard", () => {
 			"powershell -EncodedCommand ZQBjAGgAbwAgAHgA",
 			"bash -s",
 			"node --input-type=module",
+			"node --test test/unit.test.js",
 		]) {
 			const result = inspect(command);
 			assert.equal(result.ok, false, command);
-			assert.match(result.reason ?? "", /script|module|hook|fail-closed/i, command);
+			assert.match(result.reason ?? "", /script|module|hook|fail-closed|allowlist|--test/i, command);
 		}
-		assert.equal(inspect("node --test test/unit.test.js").ok, true);
 		assert.equal(inspect("node --check src/check.js").ok, true);
 		assert.equal(inspect("bash -n scripts/check.sh").ok, true);
 		assert.equal(inspect("npm test").ok, true);
+	});
+
+	it("denies non-allowlisted writers that would bypass redirection scope checks", () => {
+		for (const command of [
+			"touch ../../escaped",
+			"cp src/a.ts ../../escaped",
+			"mv src/a.ts ../../escaped",
+			"rm -rf src/a.ts",
+			"mkdir ../../escaped-dir",
+			"dd if=/dev/zero of=../../escaped bs=1 count=1",
+			"install -m 644 src/a.ts ../../escaped",
+		]) {
+			const result = inspect(command);
+			assert.equal(result.ok, false, command);
+			assert.match(result.reason ?? "", /allowlist/i, command);
+		}
 	});
 });

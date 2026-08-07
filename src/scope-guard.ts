@@ -273,6 +273,33 @@ const DETACH_COMMANDS = new Set([
 	"start", "start-process", "start-job", "start-threadjob", "schtasks", "wmic", "wscript", "cscript", "mshta",
 ]);
 
+/**
+ * Fail-closed read-oriented bash allowlist. Arbitrary writers (touch/cp/mv/rm/…)
+ * cannot be made scope-safe by parsing alone, and filesystem snapshots only cover a
+ * bounded neighbourhood — so unknown executables are denied.
+ */
+const BASH_READONLY_ALLOWLIST = new Set([
+	"ls", "dir", "cat", "type", "more", "less", "head", "tail", "wc", "file", "stat",
+	"find", "grep", "egrep", "fgrep", "rg", "ag", "ack",
+	"echo", "printf", "true", "false", "test", "pwd", "whoami", "uname", "hostname", "date",
+	"which", "where", "whereis", "basename", "dirname", "realpath", "readlink", "printenv", "env",
+	"diff", "cmp", "sort", "uniq", "cut", "tr", "od", "hexdump", "base64",
+	"md5sum", "sha1sum", "sha256sum", "cksum", "sum",
+	"jq", "yq", "awk", "sed", "tee",
+	"git",
+	"node", "nodejs", "npm", "npx", "pnpm", "yarn", "bun", "deno",
+	"cargo", "go", "rustc", "tsc", "eslint", "mocha", "jest", "vitest", "pytest",
+	"make", "cmake", "ninja", "mvn", "gradle", "dotnet",
+	"sh", "bash", "dash", "zsh", "ksh", "cmd", "powershell", "pwsh",
+]);
+
+function isBashAllowlistedExecutable(exe: string): boolean {
+	if (BASH_READONLY_ALLOWLIST.has(exe)) return true;
+	// versioned python binaries are further restricted to informational flags only
+	if (exe === "py" || /^python(?:\d+(?:\.\d+)*)?$/u.test(exe)) return true;
+	return false;
+}
+
 const SCRIPT_EXTENSIONS = /\.(?:sh|bash|dash|zsh|ksh|fish|cmd|bat|ps1|py|pyw|js|mjs|cjs|ts|mts|cts)$/iu;
 
 function isDirectScriptExecutable(token: string): boolean {
@@ -337,6 +364,12 @@ export function inspectBashCommand(
 		if (exe === "eval" || exe === "source" || exe === ".") {
 			return { ok: false, reason: `dynamic shell evaluator is not allowed: ${exe}` };
 		}
+		if (!isBashAllowlistedExecutable(exe)) {
+			return {
+				ok: false,
+				reason: `bash command not on read-only allowlist (writers cannot be scope-sandboxed by parser): ${exe || "(empty)"}`,
+			};
+		}
 		const isPython = exe === "py" || /^python(?:\d+(?:\.\d+)*)?$/u.test(exe);
 		const isNode = exe === "node" || exe === "nodejs";
 		if (isNode || isPython) {
@@ -362,11 +395,19 @@ export function inspectBashCommand(
 			if (isPython && !informational) {
 				return { ok: false, reason: `python script/module execution cannot be monitored fail-closed` };
 			}
+			// node --test is intentionally denied: it can spawn detached children that leave the
+			// worker process-group, surviving abort and outliving the owner lock.
 			const hasProgramTarget = args.some((w) => !w.startsWith("-"));
-			const safeNodeMode = informational || args.includes("--test") ||
+			const safeNodeMode = informational ||
 				((args.includes("--check") || args.includes("-c")) && hasProgramTarget);
 			if (isNode && !safeNodeMode) {
-				return { ok: false, reason: `node script/stdin execution cannot be monitored fail-closed` };
+				return { ok: false, reason: `node script/stdin/--test execution cannot be monitored fail-closed` };
+			}
+		}
+		if (exe === "sed") {
+			const args = stripped.slice(1);
+			if (args.some((w) => w === "-i" || w.startsWith("-i") || w === "--in-place" || w.startsWith("--in-place="))) {
+				return { ok: false, reason: "sed in-place write is not allowed from worker bash; use edit/write tools" };
 			}
 		}
 

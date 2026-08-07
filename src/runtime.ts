@@ -353,11 +353,24 @@ export function validatePlanGraph(tickets: Ticket[]): string | null {
 	return null;
 }
 
+/** write/full sfh cannot authorize mutations without an explicit non-empty scope. */
+export function sfhWriteRequiresAllowedScope(
+	maxAccess: string,
+	allowedScope: string[] | undefined,
+): string | null {
+	const access = (maxAccess || "read").toLowerCase();
+	if ((access === "write" || access === "full") && !(allowedScope?.length)) {
+		return 'execution:"sfh" with write/full access requires non-empty allowed_scope';
+	}
+	return null;
+}
+
 export function validateTicket(ticket: Ticket): string | null {
 	if (ticket.execution === "sfh") {
 		if (!ticket.branches?.length) return 'execution:"sfh" requires non-empty branches';
 		if (!ticket.integration?.acceptance?.length) return 'execution:"sfh" requires integration.acceptance';
 		const seen = new Set<string>();
+		let explicitWrite = false;
 		for (const b of ticket.branches) {
 			if (!b.id.trim()) return "branch.id empty";
 			if (!b.prompt.trim()) return `branch "${b.id}" prompt empty`;
@@ -366,6 +379,14 @@ export function validateTicket(ticket: Ticket): string | null {
 			const sid = sanitizeId(b.id);
 			if (seen.has(sid)) return `branch id collides after sanitize: ${b.id} → ${sid}`;
 			seen.add(sid);
+			const access = (b.access ?? "").toLowerCase();
+			if (access === "write" || access === "full") explicitWrite = true;
+		}
+		// Plan-time fail-closed when the ticket itself asks for write/full.
+		// Config-resolved write/full is enforced again at execute time.
+		if (explicitWrite) {
+			const scopeErr = sfhWriteRequiresAllowedScope("write", ticket.allowed_scope);
+			if (scopeErr) return scopeErr;
 		}
 	} else {
 		// native implementation tickets must declare a non-empty write scope (fail closed)
@@ -513,6 +534,11 @@ function evaluateGitEvidence(
 			cwd,
 			ticket.allowed_scope ?? [],
 			ticket.forbidden ?? [],
+		);
+	} else if (actualChangedFiles.length > 0) {
+		// Fail closed: write/full (or native) without declared scope cannot authorize mutations.
+		scopeViolations = actualChangedFiles.map(
+			(f) => `${f}: non-empty allowed_scope required to authorize writes`,
 		);
 	}
 	return { actualChangedFiles, scopeViolations };
@@ -987,10 +1013,27 @@ export async function runSupervisedTask(
 			maxParallel: ex.maxParallel,
 		};
 
-		const beforeSnap = captureGitSnapshot(cwd);
-		if (!beforeSnap.ok) {
+		const maxAccess = maxAccessLevel(...branchAccesses, integrateAccess);
+		const scopeErr = sfhWriteRequiresAllowedScope(maxAccess, ticket.allowed_scope);
+		if (scopeErr) {
 			ticket.status = "failed";
-			ticket.error = `git evidence failed (pre): ${beforeSnap.error ?? "unknown"}`;
+			ticket.error = scopeErr;
+			ticket.evidence = { processExitCode: 1, actualChangedFiles: [], scopeViolations: [] };
+			return;
+		}
+		// write/full lacks an OS sandbox; require the same pre/post filesystem evidence as native.
+		const needsFsEvidence = maxAccess === "write" || maxAccess === "full";
+
+		const beforeSnap = captureGitSnapshot(cwd);
+		const beforeFs = needsFsEvidence ? captureFilesystemSnapshot(cwd) : null;
+		const preError = !beforeSnap.ok
+			? `git evidence failed (pre): ${beforeSnap.error ?? "unknown"}`
+			: beforeFs && !beforeFs.ok
+				? `filesystem evidence failed (pre): ${beforeFs.error ?? "unknown"}`
+				: undefined;
+		if (preError) {
+			ticket.status = "failed";
+			ticket.error = preError;
 			ticket.evidence = { processExitCode: 1, actualChangedFiles: [], scopeViolations: [] };
 			return;
 		}
@@ -1006,26 +1049,31 @@ export async function runSupervisedTask(
 		});
 
 		const afterSnap = captureGitSnapshot(cwd);
-		const maxAccess = maxAccessLevel(...branchAccesses, integrateAccess);
+		const afterFs = needsFsEvidence ? captureFilesystemSnapshot(cwd) : null;
 		const gitEv = evaluateGitEvidence(cwd, ticket, beforeSnap, afterSnap, {
 			readOnlyAccess: maxAccess === "read",
 		});
+		const fsEv =
+			beforeFs && afterFs
+				? evaluateFilesystemEvidence(cwd, ticket, beforeFs, afterFs)
+				: { actualChangedFiles: [] as string[], scopeViolations: [] as string[] };
 
 		const evidence: ExecutionEvidence = {
 			processExitCode: result.exitCode,
-			actualChangedFiles: gitEv.actualChangedFiles,
-			scopeViolations: gitEv.scopeViolations,
+			actualChangedFiles: [...new Set([...gitEv.actualChangedFiles, ...fsEv.actualChangedFiles])],
+			scopeViolations: [...new Set([...gitEv.scopeViolations, ...fsEv.scopeViolations])],
 		};
 
-		if (gitEv.fatalError) {
+		const fatalError = gitEv.fatalError ?? fsEv.fatalError;
+		if (fatalError) {
 			ticket.status = "failed";
-			ticket.error = gitEv.fatalError;
+			ticket.error = fatalError;
 			ticket.evidence = evidence;
 			ticket.report = result.stdout.slice(0, cap);
 			return;
 		}
 
-		const sfhStatus = sfhStatusFromResult(result.exitCode, result.stdout || "", gitEv.scopeViolations);
+		const sfhStatus = sfhStatusFromResult(result.exitCode, result.stdout || "", evidence.scopeViolations);
 		if (sfhStatus === "done") {
 			ticket.status = "done";
 			const meta = [
@@ -1062,7 +1110,7 @@ export async function runSupervisedTask(
 			ticket.status = "failed";
 			ticket.error =
 				result.exitCode === 0
-					? `sfh exit 0 but scope/access violations:\n${gitEv.scopeViolations.join("\n")}`
+					? `sfh exit 0 but scope/access violations:\n${evidence.scopeViolations.join("\n")}`
 					: `sfh exit ${result.exitCode}: ${(result.stderr || result.stdout).slice(-1000)}`;
 			ticket.evidence = evidence;
 			ticket.report = result.stdout.slice(0, cap);
