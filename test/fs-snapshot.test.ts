@@ -8,7 +8,7 @@ import {
 	diffFilesystemSnapshots,
 	filesystemEvidencePath,
 } from "../src/fs-snapshot.ts";
-import { findScopeViolations } from "../src/evidence.ts";
+import { checkPath, findScopeViolations } from "../src/evidence.ts";
 import { inspectBashCommand } from "../src/scope-guard.ts";
 
 function fixture(): { parent: string; cwd: string; cleanup: () => void } {
@@ -198,6 +198,35 @@ describe("bounded implementation-worker filesystem snapshots", () => {
 		const snap = captureFilesystemSnapshot(missing);
 		assert.equal(snap.ok, false);
 		assert.ok(snap.error);
+	});
+
+	it("checkPath fails closed through symlink/junction ancestor with missing deep descendants", () => {
+		const f = fixture();
+		try {
+			const outside = path.join(f.parent, "external-target");
+			fs.mkdirSync(outside);
+			fs.mkdirSync(path.join(f.cwd, "src"), { recursive: true });
+			const link = path.join(f.cwd, "src", "out");
+			const linkType = process.platform === "win32" ? "junction" : "dir";
+			fs.symlinkSync(outside, link, linkType);
+
+			// Deep descendants do not exist yet — old resolvePath only realpath'd the
+			// immediate parent and would have treated this as lexical src/**.
+			const deep = "src/out/new/deep/pwned.txt";
+			const result = checkPath(deep, f.cwd, ["src/**"], []);
+			assert.equal(result.ok, false, "symlink ancestor must not authorize external writes");
+			assert.match(result.reason ?? "", /outside|allowed_scope|not allowed/i);
+
+			// Production write path (bash redirection) must also refuse.
+			const bash = inspectBashCommand(`printf pwned > ${deep}`, f.cwd, ["src/**"], []);
+			assert.equal(bash.ok, false);
+			assert.match(bash.reason ?? "", /outside|allowed_scope|not allowed|scope/i);
+
+			// In-scope non-symlink path still allowed.
+			assert.equal(checkPath("src/ok.txt", f.cwd, ["src/**"], []).ok, true);
+		} finally {
+			f.cleanup();
+		}
 	});
 });
 

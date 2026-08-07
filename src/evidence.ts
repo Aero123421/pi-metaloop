@@ -63,18 +63,29 @@ export function matchRule(relPosix: string, absPosix: string, rule: string): boo
 	return new RegExp(`^${globBody(r)}$`).test(normalizedTarget);
 }
 
-/** Resolve path; prefer realpath when the target exists. */
+/**
+ * Resolve path for scope containment.
+ * Walks up to the nearest existing ancestor, realpaths it (so symlink/junction
+ * ancestors cannot be skipped when deep descendants are still missing), then
+ * rejoins the missing tail before the caller decides containment.
+ */
 export function resolvePath(filePath: string, cwd: string): { rel: string; abs: string } {
 	const joined = path.isAbsolute(filePath) ? path.normalize(filePath) : path.normalize(path.join(cwd, filePath));
 	let abs = joined;
 	try {
-		if (fs.existsSync(joined)) abs = fs.realpathSync(joined);
-		else {
-			// realpath parent if possible (symlink dirs)
-			const parent = path.dirname(joined);
-			if (fs.existsSync(parent)) {
-				abs = path.join(fs.realpathSync(parent), path.basename(joined));
-			}
+		// Nearest existing ancestor — not just the leaf or its immediate parent.
+		// Otherwise `src/out` → external with write target `src/out/new/deep/x`
+		// looks lexical-in-scope while the real write follows the symlink.
+		const missing: string[] = [];
+		let cursor = joined;
+		while (!fs.existsSync(cursor)) {
+			const parent = path.dirname(cursor);
+			if (parent === cursor) break;
+			missing.unshift(path.basename(cursor));
+			cursor = parent;
+		}
+		if (fs.existsSync(cursor)) {
+			abs = missing.length === 0 ? fs.realpathSync(cursor) : path.join(fs.realpathSync(cursor), ...missing);
 		}
 	} catch {
 		abs = joined;
@@ -96,10 +107,10 @@ export function resolvePath(filePath: string, cwd: string): { rel: string; abs: 
 
 /**
  * Always reserved from ticket scope. Workers must never mutate owner locks,
- * run artifacts, or generated flows under the controller's private tree.
+ * run artifacts, generated flows, or the git control plane (refs/config/hooks).
  * Prefix form covers the directory and all descendants.
  */
-export const META_LOOP_RESERVED_PATHS = [".pi/meta-loop"] as const;
+export const META_LOOP_RESERVED_PATHS = [".pi/meta-loop", ".git"] as const;
 
 export function checkPath(
 	filePath: string,
@@ -296,8 +307,93 @@ function hashWorktreeFile(cwd: string, relPosix: string): string {
 	}
 }
 
+function hashAbsoluteFile(abs: string, label: string): string {
+	try {
+		if (!fs.existsSync(abs)) {
+			return sha256Hex(`__missing__:${label}`);
+		}
+		const st = fs.lstatSync(abs);
+		if (st.isSymbolicLink()) {
+			return sha256Hex(`__symlink__:${fs.readlinkSync(abs)}`);
+		}
+		if (st.isDirectory()) {
+			return sha256Hex(`__dir__:${label}`);
+		}
+		return sha256Hex(fs.readFileSync(abs));
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		return sha256Hex(`__error__:${label}:${msg}`);
+	}
+}
+
+/** Resolve `.git` to a real directory (handles worktree `gitdir:` files). */
+function resolveGitDir(cwd: string): { gitDir: string; relPrefix: string } | null {
+	const marker = path.join(cwd, ".git");
+	try {
+		const st = fs.lstatSync(marker);
+		if (st.isFile()) {
+			const raw = fs.readFileSync(marker, "utf8").trim();
+			const m = /^gitdir:\s*(.+)$/i.exec(raw);
+			if (!m) return null;
+			const resolved = path.resolve(cwd, m[1].trim());
+			return { gitDir: resolved, relPrefix: ".git" };
+		}
+		if (st.isSymbolicLink() || st.isDirectory()) {
+			return { gitDir: fs.realpathSync(marker), relPrefix: ".git" };
+		}
+	} catch {
+		return null;
+	}
+	return null;
+}
+
 /**
- * Snapshot HEAD + index + content hashes of dirty tracked/untracked files.
+ * Hash git control-plane paths that HEAD/index/worktree status miss:
+ * refs (including non-checkout branches), config, hooks, info, packed-refs.
+ * Objects are intentionally excluded (too large; ref movement is the control plane).
+ */
+function hashGitControlPlane(cwd: string, fileHashes: Map<string, string>): void {
+	const resolved = resolveGitDir(cwd);
+	if (!resolved) return;
+	const { gitDir, relPrefix } = resolved;
+
+	// Always record the `.git` marker itself (file or directory/symlink metadata).
+	fileHashes.set(relPrefix, hashAbsoluteFile(path.join(cwd, ".git"), relPrefix));
+
+	const controlRoots = ["HEAD", "config", "packed-refs", "commondir", "refs", "hooks", "info"] as const;
+	const walk = (abs: string, relPosix: string): void => {
+		let st: fs.Stats;
+		try {
+			st = fs.lstatSync(abs);
+		} catch {
+			return;
+		}
+		// Do not follow symlinks out of the control plane; record the link itself.
+		if (st.isSymbolicLink() || !st.isDirectory()) {
+			fileHashes.set(relPosix, hashAbsoluteFile(abs, relPosix));
+			return;
+		}
+		// Directory presence matters (e.g. hooks/ created during ticket).
+		fileHashes.set(relPosix, hashAbsoluteFile(abs, relPosix));
+		let children: string[];
+		try {
+			children = fs.readdirSync(abs);
+		} catch {
+			return;
+		}
+		children.sort();
+		for (const name of children) {
+			walk(path.join(abs, name), `${relPosix}/${name}`);
+		}
+	};
+
+	for (const name of controlRoots) {
+		walk(path.join(gitDir, name), `${relPrefix}/${name}`);
+	}
+}
+
+/**
+ * Snapshot HEAD + index + dirty worktree hashes + git control-plane hashes.
  * Fail-closed: any git/IO failure yields ok=false with error recorded (never silent empty success).
  */
 export function captureGitSnapshot(cwd: string): GitSnapshot {
@@ -359,6 +455,9 @@ export function captureGitSnapshot(cwd: string): GitSnapshot {
 			// Rename/copy records carry the original path as the following NUL record.
 			if (record.startsWith("2 ")) i += 1;
 		}
+
+		// Control plane (refs/config/hooks/…) — not visible via porcelain dirty status.
+		hashGitControlPlane(cwd, fileHashes);
 
 		return { ok: true, head, indexHash, fileHashes };
 	} catch (e) {

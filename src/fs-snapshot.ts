@@ -158,8 +158,10 @@ function ownerLockSemanticHash(raw: Buffer): string | undefined {
 
 /**
  * Capture cwd recursively and cwd's parent neighbourhood. `.git` internals are
- * excluded: HEAD/index are checked separately with semantic git snapshots and
- * read-only git commands may refresh implementation-detail metadata there.
+ * excluded here: HEAD/index plus refs/config/hooks control-plane files are
+ * covered by `captureGitSnapshot` (and `.git` is always reserved in checkPath).
+ * Read-only git commands may refresh implementation-detail metadata under `.git`
+ * that must not create false filesystem diffs.
  */
 export function captureFilesystemSnapshot(
 	cwd: string,
@@ -233,8 +235,9 @@ export function captureFilesystemSnapshot(
 			children.sort((a, b) => a.name.localeCompare(b.name));
 			for (const child of children) {
 				const abs = path.join(current.dir, child.name);
-				// Git state has its own HEAD/index snapshot. Never traverse a .git dir.
-				if (child.name === ".git" && child.isDirectory()) continue;
+				// Git control plane has its own snapshot (HEAD/index/refs/config/hooks).
+				// Never traverse a .git dir here — avoids false diffs from read-only git.
+				if (child.name === ".git" && (child.isDirectory() || child.isSymbolicLink())) continue;
 				if (opts.skipCwdSubtree && samePath(abs, cwdReal)) continue;
 				let st: fs.Stats | undefined;
 				try {

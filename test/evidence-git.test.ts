@@ -8,7 +8,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { captureGitSnapshot, diffGitSnapshots } from "../src/evidence.ts";
+import {
+	captureGitSnapshot,
+	checkPath,
+	diffGitSnapshots,
+	findScopeViolations,
+} from "../src/evidence.ts";
 import { isBlockedGitBashCommand } from "../src/scope-guard.ts";
 
 function git(cwd: string, args: string[]): string {
@@ -121,7 +126,10 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 		try {
 			const before = captureGitSnapshot(dir);
 			assert.equal(before.ok, true, before.error);
-			assert.equal(before.fileHashes.size, 0);
+			// Control-plane paths are always hashed; worktree should be clean.
+			assert.ok([...before.fileHashes.keys()].every((p) => p === ".git" || p.startsWith(".git/")),
+				`expected only control-plane hashes before dirty worktree, got ${[...before.fileHashes.keys()].join(",")}`,
+			);
 
 			fs.writeFileSync(path.join(dir, "brand-new.txt"), "hello\n", "utf-8");
 			const after = captureGitSnapshot(dir);
@@ -134,6 +142,67 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 			);
 			assert.equal(diff.headChanged, false);
 			assert.deepEqual(diff.mutatedPreDirty, []);
+		} finally {
+			rmRepo(dir);
+		}
+	});
+
+	it("detects non-checkout branch ref writes as control-plane mutations", () => {
+		const dir = initTmpRepo();
+		try {
+			const headSha = git(dir, ["rev-parse", "HEAD"]).trim();
+			const before = captureGitSnapshot(dir);
+			assert.equal(before.ok, true, before.error);
+
+			// Write a non-checkout branch ref directly — does not dirty worktree/HEAD/index.
+			const refPath = path.join(dir, ".git", "refs", "heads", "attacker-branch");
+			fs.mkdirSync(path.dirname(refPath), { recursive: true });
+			fs.writeFileSync(refPath, `${headSha}\n`, "utf-8");
+
+			const after = captureGitSnapshot(dir);
+			assert.equal(after.ok, true, after.error);
+			const diff = diffGitSnapshots(before, after);
+			const changed = [...diff.newFiles, ...diff.mutatedPreDirty];
+			assert.ok(
+				changed.some((p) => p.includes("refs/heads/attacker-branch")),
+				`expected attacker-branch ref in diff, got ${JSON.stringify(diff)}`,
+			);
+			assert.equal(diff.headChanged, false);
+			assert.equal(diff.indexChanged, false);
+
+			// Production evidence path: changed control-plane files are reserved violations.
+			const violations = findScopeViolations(changed, dir, ["**"], []);
+			assert.ok(
+				violations.some((v) => /reserved/i.test(v) && /attacker-branch|\.git/i.test(v)),
+				`expected reserved .git violation, got ${JSON.stringify(violations)}`,
+			);
+			assert.equal(checkPath(".git/refs/heads/attacker-branch", dir, ["**"], []).ok, false);
+		} finally {
+			rmRepo(dir);
+		}
+	});
+
+	it("detects .git/config and hooks control-plane mutation", () => {
+		const dir = initTmpRepo();
+		try {
+			const before = captureGitSnapshot(dir);
+			assert.equal(before.ok, true, before.error);
+
+			const configPath = path.join(dir, ".git", "config");
+			fs.appendFileSync(configPath, "\n[user]\n\tname = pwned\n", "utf-8");
+			const hookPath = path.join(dir, ".git", "hooks", "pre-commit");
+			fs.mkdirSync(path.dirname(hookPath), { recursive: true });
+			fs.writeFileSync(hookPath, "#!/bin/sh\necho pwned\n", "utf-8");
+
+			const after = captureGitSnapshot(dir);
+			assert.equal(after.ok, true, after.error);
+			const diff = diffGitSnapshots(before, after);
+			const changed = [...diff.newFiles, ...diff.mutatedPreDirty];
+			assert.ok(changed.some((p) => p.endsWith(".git/config") || p === ".git/config"), JSON.stringify(changed));
+			assert.ok(changed.some((p) => p.includes("hooks/pre-commit")), JSON.stringify(changed));
+			const violations = findScopeViolations(changed, dir, ["**"], []);
+			assert.ok(violations.every((v) => /reserved/i.test(v)), JSON.stringify(violations));
+			assert.ok(violations.length >= 2, JSON.stringify(violations));
 		} finally {
 			rmRepo(dir);
 		}

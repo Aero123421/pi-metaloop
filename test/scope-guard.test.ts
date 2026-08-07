@@ -130,4 +130,17 @@ describe("implementation-worker detached write guard", () => {
 		assert.equal(result.ok, false);
 		assert.match(result.reason ?? "", /reserved|forbidden|meta-loop/i);
 	});
+
+	it("blocks writes into reserved .git even when allowed_scope is broad", () => {
+		const broad = (command: string) => inspectBashCommand(command, cwd, ["**"], []);
+		for (const command of [
+			"printf x > .git/config",
+			"printf deadbeef > .git/refs/heads/other-branch",
+			"printf '#!/bin/sh' > .git/hooks/pre-commit",
+		]) {
+			const result = broad(command);
+			assert.equal(result.ok, false, command);
+			assert.match(result.reason ?? "", /reserved|forbidden|\.git/i, command);
+		}
+	});
 });

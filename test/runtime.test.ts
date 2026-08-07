@@ -167,6 +167,21 @@ describe("scope", () => {
 		// Non-reserved project paths still allowed under **
 		assert.equal(checkPath("src/x.ts", "/proj", ["**"], []).ok, true);
 	});
+
+	it("always reserves .git control plane even under broad allowed_scope", () => {
+		for (const target of [
+			".git/config",
+			".git/HEAD",
+			".git/refs/heads/feature-x",
+			".git/hooks/pre-commit",
+			".git/info/exclude",
+		]) {
+			const r = checkPath(target, "/proj", ["**"], []);
+			assert.equal(r.ok, false, target);
+			assert.match(r.reason ?? "", /reserved/i, target);
+		}
+		assert.equal(checkPath("src/x.ts", "/proj", ["**"], []).ok, true);
+	});
 });
 
 describe("triggers", () => {
