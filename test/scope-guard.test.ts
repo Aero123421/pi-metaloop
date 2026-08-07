@@ -124,6 +124,25 @@ describe("implementation-worker detached write guard", () => {
 		}
 	});
 
+	it("denies allowlisted-looking writers whose flags bypass redirection path checks", () => {
+		// sort -o / yq -i write without shell redirection, so checkPath never runs.
+		// They are removed from the read-only allowlist entirely (not flag-parsed).
+		for (const command of [
+			"sort -o src/out.ts src/in.ts",
+			"sort --output=src/out.ts src/in.ts",
+			"sort --output src/out.ts src/in.ts",
+			"yq -i '.x=1' src/config.yaml",
+			"yq eval -i '.x=1' src/config.yaml",
+			"yq --inplace '.x=1' src/config.yaml",
+			"sort src/a.ts",
+			"yq '.x' src/config.yaml",
+		]) {
+			const result = inspect(command);
+			assert.equal(result.ok, false, command);
+			assert.match(result.reason ?? "", /allowlist/i, command);
+		}
+	});
+
 	it("blocks writes into reserved .pi/meta-loop even when allowed_scope is broad", () => {
 		const broad = (command: string) => inspectBashCommand(command, cwd, ["**"], []);
 		const result = broad("printf x > .pi/meta-loop/runs/owner.lock.json");

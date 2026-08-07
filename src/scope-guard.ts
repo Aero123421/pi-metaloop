@@ -278,21 +278,31 @@ const DETACH_COMMANDS = new Set([
  * cannot be made scope-safe by parsing alone, and filesystem snapshots only cover a
  * bounded neighbourhood — so unknown executables are denied.
  *
+ * Admission rule: a command stays here only if every write side-channel is either
+ * (a) shell redirection (path-checked below) or (b) explicit operand checking
+ * (currently `tee` only). Commands capable of arbitrary output files, in-place
+ * edits, code execution, or child launching — even via optional flags the small
+ * parser might miss — are denied at the allowlist gate. Workers should use
+ * built-in read/grep/find/etc. for verification instead.
+ *
  * Deliberately excluded (code exec / delete / detach / unscoped write):
- * awk (system()), find (-exec/-delete), sed, npm/pnpm/yarn/npx and other
- * package/build/test runners, shells and general-purpose interpreters
- * (sh/bash/node/…). Nested `sh -c` is denied at the allowlist gate; no OS
- * sandbox is available here. `tee` remains only because every target is
- * path-checked the same way as shell redirections.
+ * awk (system()), find (-exec/-delete), sed, sort (-o/--output), yq (-i/--inplace),
+ * npm/pnpm/yarn/npx and other package/build/test runners, shells and
+ * general-purpose interpreters (sh/bash/node/…). Nested `sh -c` is denied at the
+ * allowlist gate; no OS sandbox is available here. `tee` remains only because
+ * every target is path-checked the same way as shell redirections. `jq` stays
+ * (stdout filters only; no in-place/write-file flag). `env` is prefix-stripped
+ * and the resulting executable is re-checked. `git` is limited to the read-only
+ * subcommand set above. `python` is further restricted to informational flags.
  */
 const BASH_READONLY_ALLOWLIST = new Set([
 	"ls", "dir", "cat", "type", "more", "less", "head", "tail", "wc", "file", "stat",
 	"grep", "egrep", "fgrep", "rg", "ag", "ack",
 	"echo", "printf", "true", "false", "test", "pwd", "whoami", "uname", "hostname", "date",
 	"which", "where", "whereis", "basename", "dirname", "realpath", "readlink", "printenv", "env",
-	"diff", "cmp", "sort", "uniq", "cut", "tr", "od", "hexdump", "base64",
+	"diff", "cmp", "uniq", "cut", "tr", "od", "hexdump", "base64",
 	"md5sum", "sha1sum", "sha256sum", "cksum", "sum",
-	"jq", "yq", "tee",
+	"jq", "tee",
 	"git",
 ]);
 

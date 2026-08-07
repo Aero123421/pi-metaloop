@@ -222,6 +222,23 @@ describe("bounded implementation-worker filesystem snapshots", () => {
 			assert.equal(bash.ok, false);
 			assert.match(bash.reason ?? "", /outside|allowed_scope|not allowed|scope/i);
 
+			// sort -o / yq -i bypass redirection checkPath; must not be treated as success
+			// even when the lexical path looks in-scope via a symlink/junction ancestor.
+			for (const command of [
+				`sort -o ${deep} src/in.ts`,
+				`sort --output=${deep} src/in.ts`,
+				`yq -i '.x=1' ${deep}`,
+				`yq --inplace '.x=1' ${deep}`,
+			]) {
+				const sneaky = inspectBashCommand(command, f.cwd, ["src/**"], []);
+				assert.equal(sneaky.ok, false, command);
+				assert.match(
+					sneaky.reason ?? "",
+					/allowlist|outside|allowed_scope|not allowed|scope/i,
+					command,
+				);
+			}
+
 			// In-scope non-symlink path still allowed.
 			assert.equal(checkPath("src/ok.txt", f.cwd, ["src/**"], []).ok, true);
 		} finally {
