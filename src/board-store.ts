@@ -41,7 +41,8 @@ export interface OwnerLockHolder {
 export type OwnerLockHandle =
 	| {
 			ok: true;
-			refresh: () => void;
+			/** Heartbeat. Returns false when generation is missing/mismatched (ownership lost). */
+			refresh: () => boolean;
 			release: () => void;
 	  }
 	| {
@@ -260,6 +261,22 @@ function ensureSafeDirectoryChain(cwd: string, segments: string[]): string {
 
 function ensureMetaLoopRunsRoot(cwd: string): string {
 	return ensureSafeDirectoryChain(cwd, [".pi", "meta-loop", "runs"]);
+}
+
+/**
+ * Create/validate a real non-symlink directory under `.pi/meta-loop/<segments>`.
+ * Used by board artifacts and sfh flow writes alike.
+ */
+export function ensureMetaLoopSubdir(cwd: string, ...segments: string[]): string {
+	if (segments.length === 0) {
+		throw new Error("ensureMetaLoopSubdir requires at least one segment under .pi/meta-loop");
+	}
+	return ensureSafeDirectoryChain(cwd, [".pi", "meta-loop", ...segments]);
+}
+
+/** After a controller write, confirm the real path remains under project cwd. */
+export function assertMetaLoopWriteInsideCwd(cwd: string, filePath: string): void {
+	assertWrittenPathInsideCwd(cwd, filePath);
 }
 
 /** After a write, confirm the resulting real path remains under canonical cwd. */
@@ -1156,23 +1173,48 @@ function tryExclusiveCreate(filePath: string, content: string): boolean {
 function buildLockHandle(cwd: string, ownership: OwnerLockHolder): Extract<OwnerLockHandle, { ok: true }> {
 	const lockPath = ownerLockPath(cwd);
 	let released = false;
+	const stillOwns = (): boolean => {
+		const current = readOwnerLockFile(lockPath);
+		return !!current && sameGeneration(current, ownership);
+	};
 	return {
 		ok: true,
-		refresh(): void {
-			if (released) return;
+		refresh(): boolean {
+			if (released) return false;
+			// Missing/mismatched generation is ownership loss even before the guard.
+			if (!stillOwns()) {
+				released = true;
+				return false;
+			}
 			const releaseGuard = tryGenerationGuard(lockPath, ownership.generation);
-			if (!releaseGuard) return;
+			if (!releaseGuard) {
+				// Guard contention while we still appear to own is not loss; missing lock is.
+				if (!stillOwns()) {
+					released = true;
+					return false;
+				}
+				return true;
+			}
 			try {
 				const current = readOwnerLockFile(lockPath);
-				if (!current || !sameGeneration(current, ownership)) return;
+				if (!current || !sameGeneration(current, ownership)) {
+					released = true;
+					return false;
+				}
 				const next: OwnerLockHolder = {
 					...current,
 					heartbeatAt: new Date().toISOString(),
 				};
 				atomicWriteFile(lockPath, JSON.stringify(next, null, 2));
 				assertWrittenPathInsideCwd(cwd, lockPath);
+				return true;
 			} catch {
-				/* best-effort heartbeat */
+				// Heartbeat write failed — still owned only if generation remains ours.
+				if (!stillOwns()) {
+					released = true;
+					return false;
+				}
+				return true;
 			} finally {
 				releaseGuard();
 			}
@@ -1180,7 +1222,10 @@ function buildLockHandle(cwd: string, ownership: OwnerLockHolder): Extract<Owner
 		release(): void {
 			if (released) return;
 			const releaseGuard = tryGenerationGuard(lockPath, ownership.generation);
-			if (!releaseGuard) return;
+			if (!releaseGuard) {
+				if (!stillOwns()) released = true;
+				return;
+			}
 			try {
 				const current = readOwnerLockFile(lockPath);
 				if (!sameGeneration(current, ownership)) {

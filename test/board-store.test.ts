@@ -758,4 +758,46 @@ describe("board-store", () => {
 		assert.equal(fs.readFileSync(file, "utf-8"), "two");
 		assert.ok(!fs.readdirSync(dir).some((n) => n.endsWith(".tmp")));
 	});
+
+	it("owner lock: refresh reports ownership loss after lock deletion; peer process can start", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ml-lock-deleted-"));
+		const lockPath = path.join(cwd, ".pi", "meta-loop", "runs", "owner.lock.json");
+		const a = acquireOwnerLock(cwd, { runId: "run-a", leaseSec: 30 });
+		assert.equal(a.ok, true);
+		if (!a.ok) return;
+
+		// Simulate a worker (or external actor) removing the live owner lock.
+		assert.ok(fs.existsSync(lockPath));
+		fs.rmSync(lockPath);
+		assert.equal(a.refresh(), false, "deleted lock must surface as ownership loss");
+
+		// A second process/run can now acquire — the previous owner must not keep going.
+		const moduleUrl = new URL("../src/board-store.ts", import.meta.url).href;
+		const script = [
+			`import { acquireOwnerLock } from ${JSON.stringify(moduleUrl)};`,
+			`const lock = acquireOwnerLock(${JSON.stringify(cwd)}, { runId: "run-b", leaseSec: 30 });`,
+			`process.stdout.write(JSON.stringify({ ok: lock.ok, runId: lock.ok ? "run-b" : null, reason: lock.ok ? null : lock.reason }) + "\\n");`,
+			`if (lock.ok) lock.release();`,
+		].join("\n");
+		const child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", script], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+		child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+		const code = await new Promise<number | null>((resolve, reject) => {
+			child.once("error", reject);
+			child.once("close", resolve);
+		});
+		assert.equal(code, 0, stderr || stdout);
+		const line = stdout.trim().split(/\r?\n/).filter(Boolean).pop() ?? "";
+		const peer = JSON.parse(line) as { ok: boolean; runId: string | null; reason: string | null };
+		assert.equal(peer.ok, true, "peer must acquire after lock deletion");
+		assert.equal(peer.runId, "run-b");
+		// Original handle remains lost even after peer release.
+		assert.equal(a.refresh(), false);
+		a.release(); // idempotent after loss
+	});
 });

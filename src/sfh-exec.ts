@@ -11,6 +11,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { assertMetaLoopWriteInsideCwd, ensureMetaLoopSubdir } from "./board-store.ts";
 import type { Branch, IntegrationContract, Ticket } from "./types.ts";
 import { getProcessTreeTerminationSchedule } from "./process-tree-termination.ts";
 
@@ -260,11 +261,21 @@ export function flowDir(cwd: string): string {
 	return path.join(cwd, CONFIG_DIR, "meta-loop", "flows");
 }
 
+/**
+ * Write a flow.yaml under `.pi/meta-loop/flows` with the same symlink/junction
+ * fail-closed containment used by board-store run artifacts.
+ */
 export function writeFlowFile(cwd: string, ticketId: string, yaml: string): string {
-	const dir = flowDir(cwd);
-	fs.mkdirSync(dir, { recursive: true });
+	const dir = ensureMetaLoopSubdir(cwd, "flows");
 	const file = path.join(dir, `${sanitizeId(ticketId)}.flow.yaml`);
+	if (fs.existsSync(file)) {
+		const st = fs.lstatSync(file);
+		if (st.isSymbolicLink()) {
+			throw new Error(`symlink/junction rejected in meta-loop path: ${file}`);
+		}
+	}
 	fs.writeFileSync(file, yaml, "utf-8");
+	assertMetaLoopWriteInsideCwd(cwd, file);
 	return file;
 }
 

@@ -15,7 +15,7 @@ describe("implementation-worker detached write guard", () => {
 		]) {
 			const result = inspect(command);
 			assert.equal(result.ok, false, command);
-			assert.match(result.reason ?? "", /background|detach/i, command);
+			assert.match(result.reason ?? "", /background|detach|allowlist/i, command);
 		}
 		assert.equal(inspect("printf ok 2>&1").ok, true);
 		assert.equal(inspect("printf ok >&2").ok, true);
@@ -37,7 +37,7 @@ describe("implementation-worker detached write guard", () => {
 		]) {
 			const result = inspect(command);
 			assert.equal(result.ok, false, command);
-			assert.match(result.reason ?? "", /launcher|detach|background|indirection/i, command);
+			assert.match(result.reason ?? "", /launcher|detach|background|indirection|allowlist/i, command);
 		}
 	});
 
@@ -53,11 +53,11 @@ describe("implementation-worker detached write guard", () => {
 		]) {
 			const result = inspect(command);
 			assert.equal(result.ok, false, command);
-			assert.match(result.reason ?? "", /launcher|detach|script/i, command);
+			assert.match(result.reason ?? "", /launcher|detach|script|allowlist/i, command);
 		}
 	});
 
-	it("fails closed for arbitrary interpreter/script indirection but keeps direct validation usable", () => {
+	it("fails closed for arbitrary interpreter/script/runner indirection", () => {
 		for (const command of [
 			"node scripts/later.js",
 			"node --require scripts/hook.js --test test/unit.test.js",
@@ -71,14 +71,26 @@ describe("implementation-worker detached write guard", () => {
 			"bash -s",
 			"node --input-type=module",
 			"node --test test/unit.test.js",
+			"node --check src/check.js",
+			"bash -n scripts/check.sh",
+			"npm test",
+			"pnpm test",
+			"yarn test",
+			"npx eslint .",
+			"make test",
+			"cargo test",
+			"pytest",
+			"jest",
+			"vitest",
 		]) {
 			const result = inspect(command);
 			assert.equal(result.ok, false, command);
 			assert.match(result.reason ?? "", /script|module|hook|fail-closed|allowlist|--test/i, command);
 		}
-		assert.equal(inspect("node --check src/check.js").ok, true);
-		assert.equal(inspect("bash -n scripts/check.sh").ok, true);
-		assert.equal(inspect("npm test").ok, true);
+		// Read-only allowlist remains usable.
+		assert.equal(inspect("ls src").ok, true);
+		assert.equal(inspect("git status").ok, true);
+		assert.equal(inspect("rg TODO src").ok, true);
 	});
 
 	it("denies non-allowlisted writers that would bypass redirection scope checks", () => {
@@ -95,5 +107,27 @@ describe("implementation-worker detached write guard", () => {
 			assert.equal(result.ok, false, command);
 			assert.match(result.reason ?? "", /allowlist/i, command);
 		}
+	});
+
+	it("fails closed on awk system(), find -delete, and other code-exec/delete tools", () => {
+		for (const command of [
+			`awk 'BEGIN { system("git commit --allow-empty -m bypass") }'`,
+			`awk 'BEGIN { system("setsid sleep 600 >/tmp/ml-child 2>&1 &") }'`,
+			"find .pi/meta-loop/runs -name owner.lock.json -delete",
+			"find . -name '*.ts' -exec rm {} ;",
+			"sed -i s/a/b/ src/x.ts",
+			"sed 's/a/b/' src/x.ts",
+		]) {
+			const result = inspect(command);
+			assert.equal(result.ok, false, command);
+			assert.match(result.reason ?? "", /allowlist/i, command);
+		}
+	});
+
+	it("blocks writes into reserved .pi/meta-loop even when allowed_scope is broad", () => {
+		const broad = (command: string) => inspectBashCommand(command, cwd, ["**"], []);
+		const result = broad("printf x > .pi/meta-loop/runs/owner.lock.json");
+		assert.equal(result.ok, false);
+		assert.match(result.reason ?? "", /reserved|forbidden|meta-loop/i);
 	});
 });

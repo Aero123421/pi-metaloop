@@ -94,6 +94,13 @@ export function resolvePath(filePath: string, cwd: string): { rel: string; abs: 
 	return { rel: toPosix(rel), abs: toPosix(abs) };
 }
 
+/**
+ * Always reserved from ticket scope. Workers must never mutate owner locks,
+ * run artifacts, or generated flows under the controller's private tree.
+ * Prefix form covers the directory and all descendants.
+ */
+export const META_LOOP_RESERVED_PATHS = [".pi/meta-loop"] as const;
+
 export function checkPath(
 	filePath: string,
 	cwd: string,
@@ -105,6 +112,11 @@ export function checkPath(
 	const absKey = process.platform === "win32" ? abs.toLowerCase() : abs;
 	const normRule = (r: string) => (process.platform === "win32" ? r.toLowerCase() : r);
 
+	for (const rule of META_LOOP_RESERVED_PATHS) {
+		if (matchRule(relKey, absKey, normRule(rule))) {
+			return { ok: false, reason: `reserved path matched: ${rule} (target: ${rel})` };
+		}
+	}
 	for (const rule of forbidden) {
 		if (matchRule(relKey, absKey, normRule(rule))) {
 			return { ok: false, reason: `forbidden matched: ${rule} (target: ${rel})` };
@@ -162,7 +174,8 @@ export function findScopeViolations(
 	allowed: string[],
 	forbidden: string[],
 ): string[] {
-	if (allowed.length === 0 && forbidden.length === 0) return [];
+	// Always run checkPath so reserved controller paths (`.pi/meta-loop/**`) are
+	// enforced even when a ticket omits allowed_scope/forbidden.
 	const violations: string[] = [];
 	for (const f of changedFiles) {
 		const r = checkPath(f, cwd, allowed, forbidden);

@@ -277,20 +277,23 @@ const DETACH_COMMANDS = new Set([
  * Fail-closed read-oriented bash allowlist. Arbitrary writers (touch/cp/mv/rm/…)
  * cannot be made scope-safe by parsing alone, and filesystem snapshots only cover a
  * bounded neighbourhood — so unknown executables are denied.
+ *
+ * Deliberately excluded (code exec / delete / detach / unscoped write):
+ * awk (system()), find (-exec/-delete), sed, npm/pnpm/yarn/npx and other
+ * package/build/test runners, shells and general-purpose interpreters
+ * (sh/bash/node/…). Nested `sh -c` is denied at the allowlist gate; no OS
+ * sandbox is available here. `tee` remains only because every target is
+ * path-checked the same way as shell redirections.
  */
 const BASH_READONLY_ALLOWLIST = new Set([
 	"ls", "dir", "cat", "type", "more", "less", "head", "tail", "wc", "file", "stat",
-	"find", "grep", "egrep", "fgrep", "rg", "ag", "ack",
+	"grep", "egrep", "fgrep", "rg", "ag", "ack",
 	"echo", "printf", "true", "false", "test", "pwd", "whoami", "uname", "hostname", "date",
 	"which", "where", "whereis", "basename", "dirname", "realpath", "readlink", "printenv", "env",
 	"diff", "cmp", "sort", "uniq", "cut", "tr", "od", "hexdump", "base64",
 	"md5sum", "sha1sum", "sha256sum", "cksum", "sum",
-	"jq", "yq", "awk", "sed", "tee",
+	"jq", "yq", "tee",
 	"git",
-	"node", "nodejs", "npm", "npx", "pnpm", "yarn", "bun", "deno",
-	"cargo", "go", "rustc", "tsc", "eslint", "mocha", "jest", "vitest", "pytest",
-	"make", "cmake", "ninja", "mvn", "gradle", "dotnet",
-	"sh", "bash", "dash", "zsh", "ksh", "cmd", "powershell", "pwsh",
 ]);
 
 function isBashAllowlistedExecutable(exe: string): boolean {
@@ -322,8 +325,9 @@ function inspectWriteTarget(target: string, cwd: string, allowed: string[], forb
 /**
  * Conservative implementation-worker bash inspection. Obvious shell writes are
  * path checked; dynamic evaluation, detached launchers, and arbitrary interpreter
- * scripts are blocked. Explicit validation/test modes remain usable and the
- * runtime filesystem monitor independently checks synchronous writes.
+ * scripts are blocked. Package/build/test runners and shells are denied because
+ * no OS sandbox is available. The runtime filesystem monitor independently checks
+ * synchronous writes that still slip through.
  */
 export function inspectBashCommand(
 	command: string,
@@ -370,69 +374,25 @@ export function inspectBashCommand(
 				reason: `bash command not on read-only allowlist (writers cannot be scope-sandboxed by parser): ${exe || "(empty)"}`,
 			};
 		}
+		// Defense-in-depth for python (informational flags only). Shells/node/etc. are
+		// already denied by the allowlist gate above.
 		const isPython = exe === "py" || /^python(?:\d+(?:\.\d+)*)?$/u.test(exe);
-		const isNode = exe === "node" || exe === "nodejs";
-		if (isNode || isPython) {
+		if (isPython) {
 			const args = stripped.slice(1);
 			const hasInlineEval = args.some((w) =>
-				isPython
-					? w === "-c" || w.startsWith("-c=") || (w.startsWith("-c") && w.length > 2)
-					: w === "-e" || w.startsWith("-e=") || (w.startsWith("-e") && w.length > 2) ||
-						w === "--eval" || w.startsWith("--eval=") || w === "-p" || w === "--print",
+				w === "-c" || w.startsWith("-c=") || (w.startsWith("-c") && w.length > 2),
 			);
 			const usesStdinProgram = args.length === 0 || args.includes("-") || segment.some((t) => t.kind === "op" && t.value === "<<");
 			if (hasInlineEval || usesStdinProgram) {
-				return { ok: false, reason: `inline ${exe} code is not allowed from worker bash; use a scoped file` };
-			}
-			const loadsHook = args.some((w) =>
-				["-r", "--require", "--import", "--loader", "--experimental-loader"].includes(w) ||
-				/^(?:--require|--import|--loader|--experimental-loader)=/u.test(w),
-			);
-			if (loadsHook) {
-				return { ok: false, reason: `${exe} preload hooks cannot be monitored fail-closed` };
+				return { ok: false, reason: `inline ${exe} code is not allowed from worker bash` };
 			}
 			const informational = args.some((w) => ["-v", "-V", "--version", "-h", "--help"].includes(w));
-			if (isPython && !informational) {
+			if (!informational) {
 				return { ok: false, reason: `python script/module execution cannot be monitored fail-closed` };
-			}
-			// node --test is intentionally denied: it can spawn detached children that leave the
-			// worker process-group, surviving abort and outliving the owner lock.
-			const hasProgramTarget = args.some((w) => !w.startsWith("-"));
-			const safeNodeMode = informational ||
-				((args.includes("--check") || args.includes("-c")) && hasProgramTarget);
-			if (isNode && !safeNodeMode) {
-				return { ok: false, reason: `node script/stdin/--test execution cannot be monitored fail-closed` };
-			}
-		}
-		if (exe === "sed") {
-			const args = stripped.slice(1);
-			if (args.some((w) => w === "-i" || w.startsWith("-i") || w === "--in-place" || w.startsWith("--in-place="))) {
-				return { ok: false, reason: "sed in-place write is not allowed from worker bash; use edit/write tools" };
 			}
 		}
 
-		const shellInterpreter = ["sh", "bash", "dash", "zsh", "ksh"].includes(exe);
-		if (shellInterpreter && nestedCommand(words) === null) {
-			const args = stripped.slice(1);
-			const informational = args.some((w) => ["--version", "--help"].includes(w));
-			const syntaxOnly = args.includes("-n") && args.some((w) => !w.startsWith("-"));
-			if (!informational && !syntaxOnly) {
-				return { ok: false, reason: `shell script/stdin execution cannot be monitored fail-closed: ${exe}` };
-			}
-		}
 		const nested = nestedCommand(words);
-		if (exe === "powershell" || exe === "pwsh") {
-			const lowerArgs = stripped.slice(1).map((w) => w.toLowerCase());
-			if (lowerArgs.some((w) => ["-encodedcommand", "-enc", "-file", "-f"].includes(w))) {
-				return { ok: false, reason: "PowerShell encoded/script execution cannot be monitored fail-closed" };
-			}
-			if (nested === null && !lowerArgs.some((w) => ["-help", "--help", "-version", "--version"].includes(w))) {
-				return { ok: false, reason: "PowerShell script/stdin execution cannot be monitored fail-closed" };
-			}
-		}
-		if (exe === "cmd" && nested === null) {
-			return { ok: false, reason: "cmd script/interactive execution cannot be monitored fail-closed" };
-		}
 		if (nested !== null) {
 			if (!nested.trim()) return { ok: false, reason: "shell indirection has an empty/dynamic command" };
 			const inner = inspectBashCommand(nested, cwd, allowed, forbidden, depth + 1);

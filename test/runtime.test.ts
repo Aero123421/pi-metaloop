@@ -153,6 +153,20 @@ describe("scope", () => {
 		assert.equal(matchRule("crates/a/tests/x.rs", "/p/crates/a/tests/x.rs", "crates/*/tests/**"), true);
 		assert.equal(matchRule("crates/a/nested/tests/x.rs", "/p/crates/a/nested/tests/x.rs", "crates/*/tests/**"), false);
 	});
+
+	it("always reserves .pi/meta-loop even under broad allowed_scope", () => {
+		for (const target of [
+			".pi/meta-loop/runs/owner.lock.json",
+			".pi/meta-loop/flows/x.flow.yaml",
+			".pi/meta-loop/runs/some-run/board.json",
+		]) {
+			const r = checkPath(target, "/proj", ["**"], []);
+			assert.equal(r.ok, false, target);
+			assert.match(r.reason ?? "", /reserved/i, target);
+		}
+		// Non-reserved project paths still allowed under **
+		assert.equal(checkPath("src/x.ts", "/proj", ["**"], []).ok, true);
+	});
 });
 
 describe("triggers", () => {

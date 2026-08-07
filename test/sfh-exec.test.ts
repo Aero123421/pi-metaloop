@@ -14,6 +14,7 @@ import {
 	sanitizeId,
 	validateSfhAccess,
 	validateSfhTool,
+	writeFlowFile,
 	type FlowSpec,
 } from "../src/sfh-exec.ts";
 
@@ -237,6 +238,38 @@ describe("sanitizeId", () => {
 	it("strips hostile characters", () => {
 		assert.equal(sanitizeId("a b/c"), "a-b-c");
 		assert.equal(sanitizeId("---"), "task");
+	});
+});
+
+describe("writeFlowFile path containment", () => {
+	it("rejects symlink/junction flow directory escaping project cwd", () => {
+		const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ml-sfh-flow-sym-"));
+		const cwd = path.join(parent, "repo");
+		const outside = path.join(parent, "outside");
+		fs.mkdirSync(cwd, { recursive: true });
+		fs.mkdirSync(outside, { recursive: true });
+
+		const meta = path.join(cwd, ".pi", "meta-loop");
+		fs.mkdirSync(meta, { recursive: true });
+		const flowsLink = path.join(meta, "flows");
+		const linkType = process.platform === "win32" ? "junction" : "dir";
+		fs.symlinkSync(outside, flowsLink, linkType);
+
+		assert.throws(
+			() => writeFlowFile(cwd, "ticket-1", "api_version: 1\nname: \"x\"\n"),
+			/symlink|junction|escape/i,
+		);
+		assert.equal(fs.existsSync(path.join(outside, "ticket-1.flow.yaml")), false);
+		// No leaked files under outside
+		assert.deepEqual(fs.readdirSync(outside), []);
+	});
+
+	it("writes under real .pi/meta-loop/flows inside cwd", () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ml-sfh-flow-ok-"));
+		const file = writeFlowFile(cwd, "ticket-ok", "api_version: 1\nname: \"ok\"\n");
+		assert.ok(file.startsWith(cwd));
+		assert.ok(fs.existsSync(file));
+		assert.match(file.replace(/\\/g, "/"), /\.pi\/meta-loop\/flows\/ticket-ok\.flow\.yaml$/);
 	});
 });
 

@@ -77,7 +77,7 @@ interface ActiveOrchestration {
 	allowSessionDelivery: boolean;
 	originSessionGeneration: number;
 	/** Cross-process owner lock; refresh while live, release only from work finally. */
-	lock: { refresh: () => void; release: () => void } | null;
+	lock: { refresh: () => boolean; release: () => void } | null;
 }
 
 function formatLockHolder(holder: OwnerLockHolder | null | undefined): string {
@@ -273,14 +273,45 @@ export default function (pi: ExtensionAPI) {
 	const canUseOriginSession = (run: ActiveOrchestration): boolean =>
 		run.allowSessionDelivery && !shuttingDown && run.originSessionGeneration === sessionGeneration;
 
+	/** Heartbeat owner lock; abort the live run when generation is missing/mismatched. */
+	const refreshActiveOwnership = (run: ActiveOrchestration | null = active): boolean => {
+		if (!run?.lock) return true;
+		let owned = true;
+		try {
+			owned = run.lock.refresh();
+		} catch {
+			owned = true; // transient refresh errors are not ownership loss
+		}
+		if (!owned && !run.controller.signal.aborted) {
+			run.controller.abort();
+			run.label = "stopping… (ownership lost)";
+			try {
+				// Persist without re-entering refresh (lock already marked released).
+				if (run.board) {
+					writeRun(run.cwd, {
+						runId: run.runId,
+						cwd: run.cwd,
+						goal: run.board.goal,
+						status: "stopped",
+						label: run.label,
+						startedAt: run.startedAt,
+						updatedAt: new Date().toISOString(),
+						board: run.board,
+						verdicts: run.verdicts,
+						activity: run.activity,
+					});
+				}
+			} catch {
+				/* */
+			}
+		}
+		return owned;
+	};
+
 	const persistActive = (patch: Partial<PersistedRun> = {}) => {
 		if (!active?.board) return;
 		// Heartbeat while work is live (also covers headless paths without UI poller).
-		try {
-			active.lock?.refresh();
-		} catch {
-			/* */
-		}
+		refreshActiveOwnership(active);
 		const run: PersistedRun = {
 			runId: active.runId,
 			cwd: active.cwd,
@@ -394,11 +425,7 @@ export default function (pi: ExtensionAPI) {
 			try {
 				checkCooperativeStop();
 				// Owner-lock heartbeat each poll tick while a run is live.
-				try {
-					active?.lock?.refresh();
-				} catch {
-					/* */
-				}
+				refreshActiveOwnership(active);
 				// sfh state-change notifications
 				const actives = activeRuns(ctx.cwd);
 				for (const r of actives) watchedSfh.set(r.runDir, r.status?.state ?? "running");
@@ -572,11 +599,8 @@ export default function (pi: ExtensionAPI) {
 		// Headless-safe heartbeat + STOP poll (UI poller may be absent).
 		const runPulse = setInterval(() => {
 			if (!active || active.runId !== runId) return;
-			try {
-				active.lock?.refresh();
-			} catch {
-				/* */
-			}
+			const owned = refreshActiveOwnership(active);
+			if (!owned) return;
 			if (hasStopRequest(ctx.cwd, runId) && !controller.signal.aborted) {
 				controller.abort();
 				active.label = "stopping… (STOP file)";
