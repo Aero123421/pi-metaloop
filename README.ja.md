@@ -247,6 +247,7 @@ npm run typecheck    # tsc --noEmit (strict)
 - [x] 0.2.4 — scope delta のみ、STOP ファイル解除、force orchestrate、sfh ゴースト除去、integrate access/tool 修正
 - [x] 0.2.5 — mid-review compact、verdictHistory、短い計画、/tasks ドリルダウン、user sfh full 天井
 - [x] 0.2.6 — globstar scope 判定（`**/tests/**` のディレクトリ自体も許可）
+- [x] 0.2.6 — Worker bash 廃止（built-in のみ）/ sfh write/full は OS sandbox なしで拒否
 - [ ] Phase 3 — ハーネス診断（反復障害から rules/skills/prompts の弱点指摘）
 - [ ] Phase 4 — 進化ループ（ログとスコアの蓄積、外側 improver）— 研究寄り、任意
 

@@ -8,6 +8,7 @@ import {
 	buildPrimarySummary,
 	resolveTerminalPhase,
 	sfhWriteRequiresAllowedScope,
+	sfhMutatingAccessUnsupported,
 } from "../src/runtime.ts";
 import { runElapsed, runStatusFromPhase } from "../src/board-store.ts";
 import { generateFlowYaml } from "../src/sfh-exec.ts";
@@ -69,17 +70,23 @@ describe("ticket validation", () => {
 		);
 		assert.equal(err, null);
 	});
-	it("rejects sfh write/full without allowed_scope at plan and execute gates", () => {
-		const err = validateTicket(
-			baseTicket({
-				execution: "sfh",
-				allowed_scope: [],
-				branches: [{ id: "a", prompt: "x", access: "write" }],
-				integration: { acceptance: ["ok"] },
-			}),
-		);
-		assert.ok(err);
-		assert.match(err!, /allowed_scope/);
+	it("rejects sfh write/full without OS sandbox at plan and execute gates", () => {
+		for (const access of ["write", "full"] as const) {
+			const err = validateTicket(
+				baseTicket({
+					execution: "sfh",
+					allowed_scope: ["src/**"],
+					branches: [{ id: "a", prompt: "x", access }],
+					integration: { acceptance: ["ok"] },
+				}),
+			);
+			assert.ok(err, access);
+			assert.match(err!, /sandbox|write\/full|unsupported/i, access);
+		}
+		assert.ok(sfhMutatingAccessUnsupported("write"));
+		assert.ok(sfhMutatingAccessUnsupported("full"));
+		assert.equal(sfhMutatingAccessUnsupported("read"), null);
+		// Defense-in-depth: empty scope still rejected if mutating access ever reached this gate.
 		assert.ok(sfhWriteRequiresAllowedScope("full", []));
 		assert.equal(sfhWriteRequiresAllowedScope("full", ["src/**"]), null);
 	});

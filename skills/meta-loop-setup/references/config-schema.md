@@ -14,13 +14,15 @@ Later layers win. `sfhToolModels` / `sfhToolEfforts` / `sfhToolAccess` are deep-
 
 ```json
 "roles": {
-  "orchestrator": { "model": "provider/model-id", "tools": ["read","bash", "..."] },
-  "supervisor":   { "model": "provider/model-id", "tools": ["read","bash", "..."] },
-  "worker":       { "model": "provider/model-id", "tools": ["read","write","edit","bash", "..."] }
+  "orchestrator": { "model": "provider/model-id", "tools": ["read","ls","find","grep"] },
+  "supervisor":   { "model": "provider/model-id", "tools": ["read","ls","find","grep"] },
+  "worker":       { "model": "provider/model-id", "tools": ["read","write","edit","ls","find","grep"] }
 }
 ```
 
 Empty `model` = inherit pi default. Used for **pi subprocesses** (Orchestrator / Supervisor / Worker).
+
+**bash is never granted** to scoped native workers. Listing `bash` in config/alias/args is stripped at load and blocked by the production tool_call guard. Workers use interceptable built-ins only; build/test is controller-side trusted verify.
 
 ## executor（sfh）
 
@@ -67,7 +69,7 @@ Integrate step: `sfhIntegrate*` → `sfhModel`/`sfhEffort` → worker.model for 
 ### effort / access notes
 
 - **effort** strings are tool-defined (codex/claude often `low|medium|high`; pi may ignore unknown values)
-- **access**: `read` (no writes), `write`, `full` — prefer `read` for research branches
+- **access**: `read` (no writes), `write`, `full` — **without an OS sandbox only `read` is supported** (write/full is refused at plan/execute and never marked done via post-hoc evidence alone)
 
 ## supervisor
 

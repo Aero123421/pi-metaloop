@@ -5,6 +5,8 @@ import {
 	buildConfigFromLayers,
 	captureSfhAccessCeiling,
 	defaultConfig,
+	effectiveNativeWorkerTools,
+	nativeWorkerToolsDenial,
 	resolveMaxTasksCeiling,
 	resolveSfhBranchAccess,
 	resolveSfhIntegrateAccess,
@@ -38,6 +40,35 @@ describe("role tool ceilings", () => {
 			[{ roles: { worker: { tools: ["edit", "bash"] } } }],
 		);
 		assert.deepEqual(cfg.roles.worker.tools, ["edit"]);
+	});
+
+	it("never grants bash on effective native worker tools (config/alias request stripped)", () => {
+		assert.deepEqual(defaultConfig.roles.worker.tools, [
+			"read",
+			"write",
+			"edit",
+			"ls",
+			"find",
+			"grep",
+		]);
+		assert.ok(!defaultConfig.roles.worker.tools?.includes("bash"));
+
+		// Base may list bash; project cannot re-add it, and load always strips it.
+		const cfg = buildConfigFromLayers(
+			[{ roles: { worker: { tools: ["read", "write", "edit", "bash", "grep"] } } }],
+			[{ roles: { worker: { tools: ["read", "bash", "grep"] } } }],
+		);
+		assert.deepEqual(cfg.roles.worker.tools, ["read", "grep"]);
+		assert.ok(!cfg.roles.worker.tools?.includes("bash"));
+
+		const baseOnly = buildConfigFromLayers([
+			{ roles: { worker: { tools: ["read", "write", "bash"] } } },
+		]);
+		assert.deepEqual(baseOnly.roles.worker.tools, ["read", "write"]);
+
+		assert.deepEqual(effectiveNativeWorkerTools(["bash", "read", "BASH"]), ["read"]);
+		assert.match(nativeWorkerToolsDenial(["read", "bash"]) ?? "", /bash/i);
+		assert.equal(nativeWorkerToolsDenial(["read", "edit"]), null);
 	});
 });
 

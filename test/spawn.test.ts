@@ -9,6 +9,7 @@ import {
 	buildRoleArgv,
 	estimateCommandLineLength,
 	killRoleProcessTree,
+	loadRole,
 	runRole,
 	spawnManagedProcess,
 	WINDOWS_CMDLINE_SOFT_LIMIT,
@@ -50,6 +51,16 @@ describe("spawn argv (ENAMETOOLONG guard)", () => {
 		assert.ok(index >= 0);
 		assert.equal(argv[index + 1], "read,write,edit");
 		assert.ok(!argv.includes("--no-tools"));
+	});
+
+	it("loadRole strips bash from worker tools even when config requests it", () => {
+		const loaded = loadRole("worker", { tools: ["read", "write", "edit", "bash", "grep"] });
+		assert.deepEqual(loaded.tools, ["read", "write", "edit", "grep"]);
+		const argv = buildRoleArgv(loaded, "C:/tmp/prompt.md");
+		const index = argv.indexOf("--tools");
+		assert.ok(index >= 0);
+		assert.equal(argv[index + 1], "read,write,edit,grep");
+		assert.ok(!String(argv[index + 1]).includes("bash"));
 	});
 
 	it("keeps command line well under Windows limit even with huge conceptual task", () => {

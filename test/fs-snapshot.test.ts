@@ -290,7 +290,27 @@ describe("implementation-worker bash inspection", () => {
 		]) {
 			const result = inspect(command);
 			assert.equal(result.ok, false, command);
-			assert.match(result.reason ?? "", /allowlist|blocked git/i, command);
+			assert.match(result.reason ?? "", /allowlist|blocked git|env-prefix|loader|PATH/i, command);
+		}
+	});
+
+	it("fails closed on process substitution, base64 -o, and env-prefix PATH/LD_PRELOAD", () => {
+		for (const command of [
+			"cat <(printf x)",
+			"printf x > >(cat)",
+			"base64 -o ../escaped.txt src/a.ts",
+			"base64 --output=../escaped.txt src/a.ts",
+			"LD_PRELOAD=./x.so cat src/a.ts",
+			"PATH=/evil cat src/a.ts",
+			"env LD_PRELOAD=./x.so cat src/a.ts",
+		]) {
+			const result = inspect(command);
+			assert.equal(result.ok, false, command);
+			assert.match(
+				result.reason ?? "",
+				/process substitution|allowlist|env-prefix|loader|PATH/i,
+				command,
+			);
 		}
 	});
 

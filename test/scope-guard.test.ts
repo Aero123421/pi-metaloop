@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { inspectBashCommand } from "../src/scope-guard.ts";
+import {
+	denyWorkerBashToolCall,
+	inspectBashCommand,
+	NATIVE_WORKER_BASH_DISABLED_REASON,
+} from "../src/scope-guard.ts";
 
 describe("implementation-worker detached write guard", () => {
 	const cwd = process.cwd();
@@ -37,7 +41,11 @@ describe("implementation-worker detached write guard", () => {
 		]) {
 			const result = inspect(command);
 			assert.equal(result.ok, false, command);
-			assert.match(result.reason ?? "", /launcher|detach|background|indirection|allowlist/i, command);
+			assert.match(
+				result.reason ?? "",
+				/launcher|detach|background|indirection|allowlist|env-prefix|loader|PATH/i,
+				command,
+			);
 		}
 	});
 
@@ -173,6 +181,47 @@ describe("implementation-worker detached write guard", () => {
 			const result = broad(command);
 			assert.equal(result.ok, false, command);
 			assert.match(result.reason ?? "", /reserved|forbidden|\.git/i, command);
+		}
+	});
+
+	it("production tool-call guard unconditionally denies bash", () => {
+		const denial = denyWorkerBashToolCall();
+		assert.equal(denial.block, true);
+		assert.match(denial.reason, /bash/i);
+		assert.match(denial.reason, /disabled|built-in|controller/i);
+		assert.match(NATIVE_WORKER_BASH_DISABLED_REASON, /bash/i);
+	});
+
+	it("fails closed on process substitution, base64 output, and env-prefix loader/PATH", () => {
+		for (const command of [
+			// process substitution (FIFO side channels)
+			"cat <(echo pwned)",
+			"echo hi > >(tee src/out.ts)",
+			"cat =(echo x)",
+			// base64 file output (no shell redirection for checkPath)
+			"base64 -o src/out.ts /etc/hostname",
+			"base64 --output=src/out.ts /etc/hostname",
+			"base64 --output src/out.ts /etc/hostname",
+			"base64 src/in.ts",
+			// env-prefix loader / PATH injection
+			"LD_PRELOAD=./evil.so cat src/a.ts",
+			"PATH=/tmp/evil cat src/a.ts",
+			"env LD_PRELOAD=./evil.so cat src/a.ts",
+			"env PATH=/tmp/evil cat src/a.ts",
+			"env LD_LIBRARY_PATH=/tmp cat src/a.ts",
+			// existing sort/yq/diff/rg write/exec side channels
+			"sort -o src/out.ts src/in.ts",
+			"yq -i '.x=1' src/config.yaml",
+			"diff --output=.git/config /dev/null README.md",
+			"rg --pre=sh . src/payload.sh",
+		]) {
+			const result = inspect(command);
+			assert.equal(result.ok, false, command);
+			assert.match(
+				result.reason ?? "",
+				/process substitution|allowlist|env-prefix|loader|PATH|blocked git/i,
+				command,
+			);
 		}
 	});
 });

@@ -365,6 +365,18 @@ export function sfhWriteRequiresAllowedScope(
 	return null;
 }
 
+/**
+ * Without an OS sandbox, sfh write/full cannot enforce allowed_scope. Post-hoc
+ * git/fs evidence is not sufficient to mark such work done. Read-only review remains.
+ */
+export function sfhMutatingAccessUnsupported(maxAccess: string): string | null {
+	const access = (maxAccess || "read").toLowerCase();
+	if (access === "write" || access === "full") {
+		return 'execution:"sfh" write/full is unsupported without an OS sandbox (read-only review only; use native workers with interceptable built-in tools for scoped edits)';
+	}
+	return null;
+}
+
 export function validateTicket(ticket: Ticket): string | null {
 	if (ticket.execution === "sfh") {
 		if (!ticket.branches?.length) return 'execution:"sfh" requires non-empty branches';
@@ -382,11 +394,11 @@ export function validateTicket(ticket: Ticket): string | null {
 			const access = (b.access ?? "").toLowerCase();
 			if (access === "write" || access === "full") explicitWrite = true;
 		}
-		// Plan-time fail-closed when the ticket itself asks for write/full.
+		// Plan-time fail-closed: write/full is unsupported without an OS sandbox.
 		// Config-resolved write/full is enforced again at execute time.
 		if (explicitWrite) {
-			const scopeErr = sfhWriteRequiresAllowedScope("write", ticket.allowed_scope);
-			if (scopeErr) return scopeErr;
+			const unsup = sfhMutatingAccessUnsupported("write");
+			if (unsup) return unsup;
 		}
 	} else {
 		// native implementation tickets must declare a non-empty write scope (fail closed)
@@ -1014,6 +1026,15 @@ export async function runSupervisedTask(
 		};
 
 		const maxAccess = maxAccessLevel(...branchAccesses, integrateAccess);
+		// Fail closed before spawn: no OS sandbox ⇒ write/full must not run or be marked done.
+		// Do not rely on post-hoc git/fs evidence alone for mutating sfh access.
+		const unsup = sfhMutatingAccessUnsupported(maxAccess);
+		if (unsup) {
+			ticket.status = "failed";
+			ticket.error = unsup;
+			ticket.evidence = { processExitCode: 1, actualChangedFiles: [], scopeViolations: [] };
+			return;
+		}
 		const scopeErr = sfhWriteRequiresAllowedScope(maxAccess, ticket.allowed_scope);
 		if (scopeErr) {
 			ticket.status = "failed";
@@ -1021,7 +1042,7 @@ export async function runSupervisedTask(
 			ticket.evidence = { processExitCode: 1, actualChangedFiles: [], scopeViolations: [] };
 			return;
 		}
-		// write/full lacks an OS sandbox; require the same pre/post filesystem evidence as native.
+		// Mutating access is rejected above; keep the flag for defense-in-depth if that gate moves.
 		const needsFsEvidence = maxAccess === "write" || maxAccess === "full";
 
 		const beforeSnap = captureGitSnapshot(cwd);
@@ -1249,6 +1270,10 @@ export async function runSupervisedTask(
 			notify(hooks, board, `executing: ${ticket.id}`);
 			const workerTask = [
 				"Execute this ticket only. Stay inside allowed_scope. End with the required JSON report.",
+				"",
+				"Tools: interceptable built-ins only (read/write/edit/ls/find/grep). bash/shell is NOT available",
+				"and cannot be enabled via alias, args, or config. Do not claim shell build/test runs —",
+				"controller-side trusted deterministic verify owns build/test.",
 				"",
 				"Git state mutation is forbidden: do NOT git commit, push, branch switch/checkout, reset, stash,",
 				"rebase, merge, or otherwise change HEAD/branch/index state. Worktree edits inside allowed_scope only.",

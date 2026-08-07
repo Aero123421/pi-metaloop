@@ -11,10 +11,12 @@
 |----|------------------|
 | Orchestrator | read, ls, find, grep（**bash なし**） |
 | Supervisor | read, ls, find, grep（**bash なし**） |
-| Worker | read, write, edit, ls, find, grep, **bash**（project で狭め可） |
-| sfh group | access は config で `read` / `write` / `full`（既定 `read`） |
+| Worker | read, write, edit, ls, find, grep（**bash なし**・intercept 可能な built-in のみ） |
+| sfh group | **read-only review**（OS sandbox なしでは write/full を実行・done にしない） |
 
 Project config は user/default の能力を**狭めるだけ**（sfhBinary 変更・access 引き上げ・allowlist 拡大は不可）。
+Native Worker の effective tools から bash は常に除外され、tool_call guard も bash を無条件拒否する。
+ビルド/テストは controller 側の trusted deterministic verify が担当する。
 
 ## 監査
 
@@ -50,7 +52,8 @@ folder が legacy に勝つ。standards は優先度高い層を cap 内で優�
 
 ## 既知の限界（α）
 
-- Worker 既定に bash があるため、scope は git evidence + allowed_scope ガード頼み（危険コマンドはユーザー責任）
+- bash 個別 denylist は収束しないため、scoped native Worker では bash 自体を付与しない（built-in + scope + evidence）
+- sfh write/full は OS sandbox なしでは scope を保証できないため拒否（read-only review のみ）
 - background 中に Primary が同じ tree を編集すると Worker と衝突しうる（ユーザー判断）
 - チケット実行中の壁時計 Supervisor は未実装（チケット境界）
 - nesting guard は協調的経路向け

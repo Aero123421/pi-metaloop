@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import type { Message } from "@earendil-works/pi-ai";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { RoleRunResult, UsageStats } from "./types.ts";
-import type { RoleConfig } from "./config.ts";
+import { effectiveNativeWorkerTools, type RoleConfig } from "./config.ts";
 import { getProcessTreeTerminationSchedule } from "./process-tree-termination.ts";
 
 export type RoleName = "orchestrator" | "supervisor" | "worker";
@@ -67,12 +67,14 @@ export function loadRole(name: RoleName, roleConfig: RoleConfig): LoadedRole {
 	} catch {
 		/* missing agent file */
 	}
+	const configuredTools = roleConfig.tools ?? fmTools;
 	return {
 		name,
 		systemPrompt,
 		model: roleConfig.model || fmModel,
-		// Config tools win; never silently expand beyond config when set
-		tools: roleConfig.tools ?? fmTools,
+		// Config tools win; never silently expand beyond config when set.
+		// Scoped native workers always drop bash even if frontmatter/config asks for it.
+		tools: name === "worker" ? effectiveNativeWorkerTools(configuredTools) : configuredTools,
 	};
 }
 

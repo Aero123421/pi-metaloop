@@ -72,8 +72,33 @@ export interface MetaLoopConfig {
 }
 
 const READ_TOOLS = ["read", "ls", "find", "grep"];
-/** Default Worker tools. bash is included so git/cargo/pnpm tickets can run; project config may narrow. */
-const WORKER_TOOLS = ["read", "write", "edit", "ls", "find", "grep", "bash"];
+/**
+ * Default Worker tools — interceptable built-ins only.
+ * bash is never granted to scoped native workers: shell parsing cannot prove scope,
+ * and build/test verification is the controller's trusted deterministic path.
+ */
+const WORKER_TOOLS = ["read", "write", "edit", "ls", "find", "grep"];
+
+/** Tools that must never appear on a scoped native Worker's effective Pi tool list. */
+const NATIVE_WORKER_DENIED_TOOLS = new Set(["bash"]);
+
+/**
+ * Effective Pi tools for a native implementation worker.
+ * Always strips bash (and any future denied shell tools) even when alias/args/config request them.
+ * `undefined` → default interceptable built-ins; `[]` stays deny-all.
+ */
+export function effectiveNativeWorkerTools(tools?: string[]): string[] {
+	const base = tools === undefined ? [...WORKER_TOOLS] : tools.map(String);
+	return base.filter((t) => !NATIVE_WORKER_DENIED_TOOLS.has(t.trim().toLowerCase()));
+}
+
+/** Non-null when a tool list still requests a denied worker tool (plan/execute reject path). */
+export function nativeWorkerToolsDenial(tools?: string[]): string | null {
+	if (!tools?.length) return null;
+	const denied = tools.map(String).filter((t) => NATIVE_WORKER_DENIED_TOOLS.has(t.trim().toLowerCase()));
+	if (!denied.length) return null;
+	return `native worker tools must not include ${[...new Set(denied)].join(", ")} (interceptable built-ins only; build/test is controller-side verify)`;
+}
 
 const defaultConfig: MetaLoopConfig = {
 	enabled: true,
@@ -362,6 +387,11 @@ export function captureSfhAccessCeiling(config: MetaLoopConfig): SfhAccessCeilin
  * Build config from explicit base/project layer objects (tests + programmatic use).
  * Mirrors loadConfig layering: base → capture ceiling → project (min-only).
  */
+/** Refuse bash (etc.) on worker tools even when a base/user layer lists them. */
+function enforceNativeWorkerToolPolicy(config: MetaLoopConfig): void {
+	config.roles.worker.tools = effectiveNativeWorkerTools(config.roles.worker.tools);
+}
+
 export function buildConfigFromLayers(
 	baseLayers: Array<Record<string, unknown> | null | undefined> = [],
 	projectLayers: Array<Record<string, unknown> | null | undefined> = [],
@@ -370,6 +400,7 @@ export function buildConfigFromLayers(
 	for (const layer of baseLayers) applyLayer(merged, layer ?? null, "base");
 	captureSfhAccessCeiling(merged);
 	for (const layer of projectLayers) applyLayer(merged, layer ?? null, "project");
+	enforceNativeWorkerToolPolicy(merged);
 	return merged;
 }
 
@@ -392,7 +423,8 @@ export function loadConfig(cwd: string): MetaLoopConfig {
 	applyLayer(merged, legacy, "project");
 	applyLayer(merged, folder, "project");
 
-	// Force sfh integrate default stays whatever user set; no hard-coded read-only wipe
+	// Scoped native workers never receive bash, regardless of alias/args/config requests.
+	enforceNativeWorkerToolPolicy(merged);
 	return merged;
 }
 

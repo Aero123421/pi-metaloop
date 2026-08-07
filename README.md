@@ -250,9 +250,10 @@ npm run typecheck    # tsc --noEmit (strict)
 
 ## Security (alpha)
 
-- Orchestrator / Supervisor default tools are **read-only** (no bash).
-- Worker default tools are read/write/edit/**bash**; `allowed_scope` is enforced on write/edit **and** checked after run via `git` dirty files when possible. Project config may remove bash.
-- sfh parallel groups default to `access: read`; set `executor.sfhAccess` / `sfhToolAccess` / `sfhIntegrateAccess` to `write` or **`full`** in **user** config when needed (project config can only narrow, not raise).
+- Orchestrator / Supervisor / Worker default tools include **no bash**.
+- Worker tools are interceptable built-ins only (`read`/`write`/`edit`/`ls`/`find`/`grep`). `allowed_scope` is enforced on write/edit **and** checked after run via git + filesystem evidence. bash requested via alias/args/config is stripped and blocked at the tool_call gate.
+- Build/test shell execution is **not** a Worker duty — controller-side trusted deterministic verify owns it.
+- sfh parallel groups are **read-only review** without an OS sandbox. `write`/`full` is refused at plan/execute (not marked done via post-hoc evidence alone).
 - Project config may only **narrow** capabilities relative to user/defaults (cannot raise sfh access, swap sfhBinary, or expand tool allow-lists past the user ceiling).
 - Project `standards.md` is treated as **untrusted criteria data** in prompts.
 - Generated flows under `.pi/meta-loop/flows/` may contain user text — gitignore them; do not commit secrets.
@@ -272,6 +273,7 @@ npm run typecheck    # tsc --noEmit (strict)
 - [x] 0.2.4 — delta scope evidence, STOP file unlock, force orchestrate, sfh ghost filter, integrate access/tool fix
 - [x] 0.2.5 — compact mid-review, verdictHistory, smaller plans, /tasks drill-down, user sfh full ceiling
 - [x] 0.2.6 — real globstar scope matching, including directory entries for `**/tests/**`
+- [x] 0.2.6 — systemic worker security: no bash on scoped native workers; sfh write/full fail-closed without OS sandbox
 - [ ] Phase 3 — harness diagnosis (repeated failures → rules/skills/prompts weaknesses)
 - [ ] Phase 4 — evolution loop (logs + scores, external improver) — research-grade, optional
 

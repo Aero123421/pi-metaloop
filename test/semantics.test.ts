@@ -189,9 +189,9 @@ describe("validateTicket allowed_scope fail-closed", () => {
 		assert.equal(err, null);
 	});
 
-	it("sfh ticket with explicit write/full branch.access requires non-empty allowed_scope", () => {
+	it("sfh ticket with explicit write/full branch.access is unsupported without OS sandbox", () => {
 		for (const access of ["write", "full"] as const) {
-			const err = validateTicket(
+			const errEmpty = validateTicket(
 				baseTicket({
 					execution: "sfh",
 					allowed_scope: [],
@@ -199,8 +199,19 @@ describe("validateTicket allowed_scope fail-closed", () => {
 					integration: { acceptance: ["merged"] },
 				}),
 			);
-			assert.ok(err, access);
-			assert.match(err!, /allowed_scope/i, access);
+			assert.ok(errEmpty, access);
+			assert.match(errEmpty!, /sandbox|write\/full|unsupported/i, access);
+
+			const errScoped = validateTicket(
+				baseTicket({
+					execution: "sfh",
+					allowed_scope: ["src/**"],
+					branches: [{ id: "a", prompt: "work", access }],
+					integration: { acceptance: ["merged"] },
+				}),
+			);
+			assert.ok(errScoped, access);
+			assert.match(errScoped!, /sandbox|write\/full|unsupported/i, access);
 		}
 	});
 

@@ -1,10 +1,11 @@
 /**
  * Worker scope guard — loaded into implementation-worker subprocesses via `pi -e`.
  *
- * write/edit are path checked. Bash receives a conservative command inspection
- * that understands common shell indirection and direct shell write forms. The
- * runtime additionally takes bounded pre/post filesystem snapshots because no
- * command parser can prove that an arbitrary executable will not write.
+ * write/edit are path checked. Bash is unconditionally denied at the tool_call
+ * gate for scoped native workers (defense in depth: shell parsing does not
+ * converge on a safe allowlist). `inspectBashCommand` remains as a secondary
+ * inspector for tests and any residual call sites. The runtime also takes
+ * bounded pre/post filesystem snapshots for built-in write/edit paths.
  */
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -285,6 +286,15 @@ export interface BashInspection {
 	reason?: string;
 }
 
+/** Production reason when the bash tool is invoked on a scoped native worker. */
+export const NATIVE_WORKER_BASH_DISABLED_REASON =
+	"bash is disabled for scoped native workers; use interceptable built-ins only (read/write/edit/ls/find/grep). Build/test verification is controller-side trusted verify";
+
+/** Unconditional production denial for any bash tool_call (plan/execute/config cannot override). */
+export function denyWorkerBashToolCall(): { block: true; reason: string } {
+	return { block: true, reason: `pi-meta-loop scope guard: ${NATIVE_WORKER_BASH_DISABLED_REASON}` };
+}
+
 const DETACH_COMMANDS = new Set([
 	// POSIX shell/job/session detachment and service/scheduler submission.
 	"nohup", "setsid", "disown", "bg", "coproc", "daemon", "daemonize", "systemd-run", "at", "batch",
@@ -309,19 +319,23 @@ const DETACH_COMMANDS = new Set([
  * diff (--output), rg/ag/ack (--pre and plugins), less/more (! shell-out),
  * git (diff --output, -c/GIT_* pager and external-diff child launch — also
  * blocked in gitWordsAreBlocked), npm/pnpm/yarn/npx and other package/build/test
- * runners, shells and general-purpose interpreters (sh/bash/node/…). Nested
- * `sh -c` is denied at the allowlist gate; no OS sandbox is available here.
- * `tee` remains only because every target is path-checked the same way as shell
- * redirections. `jq` stays (stdout filters only). `grep`/`egrep`/`fgrep` stay
- * (no preprocessor/exec flag). `env` is prefix-stripped and the resulting
- * executable is re-checked. `python` is further restricted to informational flags.
+ * runners, shells and general-purpose interpreters (sh/bash/node/…), base64
+ * (-o/--output file writes), process substitution, and env-prefix loader/PATH
+ * assignments (LD_PRELOAD, PATH, …). Nested `sh -c` is denied at the allowlist
+ * gate; no OS sandbox is available here. `tee` remains only because every target
+ * is path-checked the same way as shell redirections. `jq` stays (stdout filters
+ * only). `grep`/`egrep`/`fgrep` stay (no preprocessor/exec flag). Bare `env` may
+ * print the environment; assignments via `env` or shell prefixes are rejected.
+ * `python` is further restricted to informational flags.
+ *
+ * Production always denies the bash tool entirely; this allowlist is defense in depth.
  */
 const BASH_READONLY_ALLOWLIST = new Set([
 	"ls", "dir", "cat", "type", "head", "tail", "wc", "file", "stat",
 	"grep", "egrep", "fgrep",
 	"echo", "printf", "true", "false", "test", "pwd", "whoami", "uname", "hostname", "date",
 	"which", "where", "whereis", "basename", "dirname", "realpath", "readlink", "printenv", "env",
-	"cmp", "uniq", "cut", "tr", "od", "hexdump", "base64",
+	"cmp", "uniq", "cut", "tr", "od", "hexdump",
 	"md5sum", "sha1sum", "sha256sum", "cksum", "sum",
 	"jq", "tee",
 ]);
@@ -359,6 +373,45 @@ function inspectWriteTarget(target: string, cwd: string, allowed: string[], forb
  * no OS sandbox is available. The runtime filesystem monitor independently checks
  * synchronous writes that still slip through.
  */
+/** Shell env assignments (including LD_PRELOAD/PATH) and `env VAR=…` loaders. */
+function hasEnvAssignmentIndirection(input: string[]): boolean {
+	let words = [...input];
+	while (words.length) {
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[0] ?? "")) return true;
+		const exe = executableName(words[0] ?? "");
+		if (exe === "sudo") {
+			words.shift();
+			while (words[0]?.startsWith("-")) {
+				const option = words.shift();
+				if (option === "-u" || option === "-g" || option === "-h" || option === "-p") words.shift();
+			}
+			continue;
+		}
+		if (exe === "command" || exe === "exec") {
+			words.shift();
+			while (words[0]?.startsWith("-")) words.shift();
+			continue;
+		}
+		if (exe === "env") {
+			words.shift();
+			for (let i = 0; i < words.length; i++) {
+				const word = words[i];
+				if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) return true;
+				if (word === "-u" || word === "--unset") {
+					i += 1;
+					continue;
+				}
+				if (word.startsWith("-")) continue;
+				words = words.slice(i);
+				break;
+			}
+			continue;
+		}
+		return false;
+	}
+	return false;
+}
+
 export function inspectBashCommand(
 	command: string,
 	cwd: string,
@@ -372,6 +425,10 @@ export function inspectBashCommand(
 	if (command.includes("$(") || command.includes("`")) {
 		return { ok: false, reason: "dynamic command substitution is not allowed from worker bash" };
 	}
+	// Process substitution `>(…)`, `<(…)`, `=(…)` writes/reads via FIFOs the small parser cannot scope-check.
+	if (/<\(|>\(|=\(/u.test(command)) {
+		return { ok: false, reason: "process substitution is not allowed from worker bash" };
+	}
 	const lexed = lexShell(command);
 	if (!lexed.ok) return { ok: false, reason: lexed.error };
 	if (lexed.tokens.some((token) => token.kind === "op" && token.value === "&")) {
@@ -382,6 +439,12 @@ export function inspectBashCommand(
 		const words = commandWords(segment);
 		if (hasEnvSplitPrefix(words)) {
 			return { ok: false, reason: "env split-string command indirection cannot be scope-checked" };
+		}
+		if (hasEnvAssignmentIndirection(words)) {
+			return {
+				ok: false,
+				reason: "env-prefix assignment cannot be scope-checked (loader/PATH injection)",
+			};
 		}
 		if (gitWordsAreBlocked(words)) return { ok: false, reason: "blocked git state-changing command" };
 		const stripped = stripCommandPrefixes(words);
@@ -461,14 +524,10 @@ export default function (pi: ExtensionAPI) {
 	const forbidden = parseList(process.env.PI_META_LOOP_FORBIDDEN);
 
 	pi.on("tool_call", async (event) => {
+		// Defense in depth: bash is never granted to scoped native workers. Do not
+		// consult the command inspector — config/alias/args cannot re-enable it.
 		if (event.toolName === "bash") {
-			const input = event.input as Record<string, unknown>;
-			const command = String(input.command ?? input.cmd ?? "");
-			const result = inspectBashCommand(command, cwd, allowed, forbidden);
-			if (!result.ok) {
-				return { block: true, reason: `pi-meta-loop scope guard: ${result.reason}` };
-			}
-			return;
+			return denyWorkerBashToolCall();
 		}
 
 		if (!MUTATING.has(event.toolName)) return;
