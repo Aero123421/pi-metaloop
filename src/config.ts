@@ -13,6 +13,7 @@ import { defaultEscalation } from "./escalation.ts";
 
 export interface RoleConfig {
 	model?: string;
+	/** undefined inherits role/pi defaults; [] explicitly disables every tool. */
 	tools?: string[];
 }
 
@@ -37,7 +38,15 @@ export interface ExecutorSettings {
 	sfhAccess?: string;
 	sfhToolAccess?: Record<string, string>;
 	sfhIntegrateAccess?: string;
+	/** undefined is unrestricted; [] denies every sfh preset tool. */
 	sfhAllowedTools?: string[];
+}
+
+/** Access ceilings captured after base (repo/user/global) layers. Project/ticket cannot raise above these. */
+export interface SfhAccessCeiling {
+	sfhAccess: string;
+	sfhToolAccess: Record<string, string>;
+	sfhIntegrateAccess: string;
 }
 
 export interface MetaLoopConfig {
@@ -55,10 +64,16 @@ export interface MetaLoopConfig {
 		concurrency: number;
 		perTaskOutputCap: number;
 	};
+	/**
+	 * Base-layer (user/global) sfh access ceilings.
+	 * Applied as min() over tool map / branch.access / integrate resolution so project or ticket cannot escalate.
+	 */
+	sfhAccessCeiling?: SfhAccessCeiling;
 }
 
 const READ_TOOLS = ["read", "ls", "find", "grep"];
-const WORKER_TOOLS = ["read", "write", "edit", "ls", "find", "grep"];
+/** Default Worker tools. bash is included so git/cargo/pnpm tickets can run; project config may narrow. */
+const WORKER_TOOLS = ["read", "write", "edit", "ls", "find", "grep", "bash"];
 
 const defaultConfig: MetaLoopConfig = {
 	enabled: true,
@@ -87,7 +102,6 @@ const defaultConfig: MetaLoopConfig = {
 		sfhAccess: "read",
 		sfhToolAccess: {},
 		sfhIntegrateAccess: "read",
-		sfhAllowedTools: [],
 	},
 	escalation: { ...defaultEscalation },
 	limits: {
@@ -114,8 +128,10 @@ function readJsonIfExists(p: string): Record<string, unknown> | null {
 }
 
 function intersectTools(ceiling: string[] | undefined, request: string[] | undefined): string[] | undefined {
-	if (!request) return ceiling;
-	if (!ceiling || ceiling.length === 0) return request;
+	if (request === undefined) return ceiling;
+	// An undefined ceiling means the inherited pi defaults, which an explicit
+	// project list may narrow. An explicit empty ceiling is already deny-all.
+	if (ceiling === undefined) return request;
 	const set = new Set(ceiling);
 	return request.filter((t) => set.has(t));
 }
@@ -127,14 +143,13 @@ function minAccess(a?: string, b?: string): string {
 	return m <= 0 ? "read" : m === 1 ? "write" : "full";
 }
 
-function intersectAllowList(ceiling: string[] | undefined, request: string[] | undefined): string[] {
-	// empty ceiling = unrestricted; empty request = no change when applying project
-	if (request === undefined) return ceiling ?? [];
-	if (request.length === 0) {
-		// empty request means "unrestricted" intent — do not expand past ceiling
-		return ceiling && ceiling.length > 0 ? ceiling : [];
-	}
-	if (!ceiling || ceiling.length === 0) return request;
+function intersectAllowList(
+	ceiling: string[] | undefined,
+	request: string[] | undefined,
+): string[] | undefined {
+	// undefined = unrestricted/no project change; [] = explicit deny-all.
+	if (request === undefined) return ceiling;
+	if (ceiling === undefined) return request;
 	const set = new Set(ceiling);
 	return request.filter((t) => set.has(t));
 }
@@ -169,14 +184,55 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 	}
 	if (layer.limits && typeof layer.limits === "object") {
 		const L = layer.limits as any;
-		merged.limits = {
+		const requested = {
 			maxTasks: clampInt(L.maxTasks ?? merged.limits.maxTasks, 1, 64),
 			concurrency: clampInt(L.concurrency ?? merged.limits.concurrency, 1, 8),
 			perTaskOutputCap: clampInt(L.perTaskOutputCap ?? merged.limits.perTaskOutputCap, 1000, 5_000_000),
 		};
+		merged.limits =
+			kind === "project"
+				? {
+						maxTasks: Math.min(merged.limits.maxTasks, requested.maxTasks),
+						concurrency: Math.min(merged.limits.concurrency, requested.concurrency),
+						perTaskOutputCap: Math.min(merged.limits.perTaskOutputCap, requested.perTaskOutputCap),
+				  }
+				: requested;
 	}
 	if (layer.supervisor && typeof layer.supervisor === "object") {
-		merged.supervisor = { ...merged.supervisor, ...(layer.supervisor as object) };
+		const s = layer.supervisor as Record<string, unknown>;
+		if (kind === "project") {
+			merged.supervisor = {
+				auto: s.auto === false ? false : merged.supervisor.auto,
+				checkIntervalMinutes: narrowNonNegativeInt(
+					merged.supervisor.checkIntervalMinutes,
+					s.checkIntervalMinutes,
+				),
+				workerStartThreshold: narrowNonNegativeInt(
+					merged.supervisor.workerStartThreshold,
+					s.workerStartThreshold,
+				),
+				maxConsecutiveFailures: narrowNonNegativeInt(
+					merged.supervisor.maxConsecutiveFailures,
+					s.maxConsecutiveFailures,
+				),
+			};
+		} else {
+			merged.supervisor = {
+				auto: typeof s.auto === "boolean" ? s.auto : merged.supervisor.auto,
+				checkIntervalMinutes: configuredNonNegativeInt(
+					s.checkIntervalMinutes,
+					merged.supervisor.checkIntervalMinutes,
+				),
+				workerStartThreshold: configuredNonNegativeInt(
+					s.workerStartThreshold,
+					merged.supervisor.workerStartThreshold,
+				),
+				maxConsecutiveFailures: configuredNonNegativeInt(
+					s.maxConsecutiveFailures,
+					merged.supervisor.maxConsecutiveFailures,
+				),
+			};
+		}
 	}
 	if (layer.escalation && typeof layer.escalation === "object") {
 		merged.escalation = { ...merged.escalation, ...(layer.escalation as object) };
@@ -189,18 +245,28 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 			merged.executor = {
 				...cur,
 				sfhEnabled: ex.sfhEnabled === false ? false : cur.sfhEnabled,
-				timeoutSec: clampInt(ex.timeoutSec ?? cur.timeoutSec, 30, 86_400),
-				maxParallel: clampInt(ex.maxParallel ?? cur.maxParallel, 1, 16),
+				timeoutSec: Math.min(
+					cur.timeoutSec,
+					clampInt(ex.timeoutSec ?? cur.timeoutSec, 30, 86_400),
+				),
+				maxParallel: Math.min(
+					cur.maxParallel,
+					clampInt(ex.maxParallel ?? cur.maxParallel, 1, 16),
+				),
 				sfhModel: typeof ex.sfhModel === "string" ? ex.sfhModel : cur.sfhModel,
 				sfhIntegrateModel: typeof ex.sfhIntegrateModel === "string" ? ex.sfhIntegrateModel : cur.sfhIntegrateModel,
 				sfhEffort: typeof ex.sfhEffort === "string" ? ex.sfhEffort : cur.sfhEffort,
 				sfhIntegrateEffort: typeof ex.sfhIntegrateEffort === "string" ? ex.sfhIntegrateEffort : cur.sfhIntegrateEffort,
-				sfhAccess: minAccess(cur.sfhAccess, ex.sfhAccess),
-				sfhIntegrateAccess: minAccess(cur.sfhIntegrateAccess ?? "read", ex.sfhIntegrateAccess ?? "read"),
+				sfhAccess:
+					ex.sfhAccess === undefined ? cur.sfhAccess : minAccess(cur.sfhAccess, ex.sfhAccess),
+				sfhIntegrateAccess:
+					ex.sfhIntegrateAccess === undefined
+						? cur.sfhIntegrateAccess
+						: minAccess(cur.sfhIntegrateAccess ?? "read", ex.sfhIntegrateAccess),
 				sfhAllowedTools: intersectAllowList(cur.sfhAllowedTools, Array.isArray(ex.sfhAllowedTools) ? ex.sfhAllowedTools.map(String) : undefined),
 				sfhToolModels: { ...(cur.sfhToolModels ?? {}), ...(ex.sfhToolModels && typeof ex.sfhToolModels === "object" ? ex.sfhToolModels : {}) },
 				sfhToolEfforts: { ...(cur.sfhToolEfforts ?? {}), ...(ex.sfhToolEfforts && typeof ex.sfhToolEfforts === "object" ? ex.sfhToolEfforts : {}) },
-				sfhToolAccess: mergeAccessMap(cur.sfhToolAccess, ex.sfhToolAccess),
+				sfhToolAccess: mergeAccessMap(cur.sfhToolAccess, ex.sfhToolAccess, cur.sfhAccess),
 				// sfhBinary intentionally not overridable by project
 				sfhBinary: cur.sfhBinary,
 			};
@@ -217,11 +283,15 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 	}
 }
 
-function mergeAccessMap(ceiling?: Record<string, string>, request?: Record<string, string>): Record<string, string> {
+function mergeAccessMap(
+	ceiling?: Record<string, string>,
+	request?: Record<string, string>,
+	fallbackCeiling: string = "full",
+): Record<string, string> {
 	const out = { ...(ceiling ?? {}) };
 	if (!request || typeof request !== "object") return out;
 	for (const [k, v] of Object.entries(request)) {
-		out[k] = minAccess(out[k] ?? "full", v);
+		out[k] = minAccess(out[k] ?? fallbackCeiling, v);
 	}
 	return out;
 }
@@ -230,6 +300,23 @@ function clampInt(n: unknown, min: number, max: number): number {
 	const v = typeof n === "number" ? n : Number(n);
 	if (!Number.isFinite(v)) return min;
 	return Math.min(max, Math.max(min, Math.floor(v)));
+}
+
+function configuredNonNegativeInt(value: unknown, fallback: number): number {
+	const n = typeof value === "number" ? value : Number(value);
+	return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
+}
+
+function narrowNonNegativeInt(ceiling: number, request: unknown): number {
+	if (request === undefined) return ceiling;
+	return Math.min(ceiling, configuredNonNegativeInt(request, ceiling));
+}
+
+/** Tool max_tasks may narrow the configured ceiling, never raise it. */
+export function resolveMaxTasksCeiling(configured: number, requested?: number): number {
+	const ceiling = clampInt(configured, 1, 64);
+	if (requested === undefined) return ceiling;
+	return Math.min(ceiling, clampInt(requested, 1, 64));
 }
 
 function cloneDefault(): MetaLoopConfig {
@@ -246,11 +333,44 @@ function cloneDefault(): MetaLoopConfig {
 			sfhToolModels: {},
 			sfhToolEfforts: {},
 			sfhToolAccess: {},
-			sfhAllowedTools: [],
+			sfhAllowedTools:
+				defaultConfig.executor.sfhAllowedTools === undefined
+					? undefined
+					: [...defaultConfig.executor.sfhAllowedTools],
 		},
 		escalation: { ...defaultConfig.escalation },
 		limits: { ...defaultConfig.limits },
 	};
+}
+
+/** Snapshot executor access fields as the base-layer ceiling (call after base layers, before project). */
+export function captureSfhAccessCeiling(config: MetaLoopConfig): SfhAccessCeiling {
+	const toolAccess: Record<string, string> = {};
+	for (const [k, v] of Object.entries(config.executor.sfhToolAccess ?? {})) {
+		if (typeof v === "string" && v.trim()) toolAccess[k] = normalizeAccess(v);
+	}
+	const ceiling: SfhAccessCeiling = {
+		sfhAccess: normalizeAccess(config.executor.sfhAccess ?? "read"),
+		sfhToolAccess: toolAccess,
+		sfhIntegrateAccess: normalizeAccess(config.executor.sfhIntegrateAccess ?? "read"),
+	};
+	config.sfhAccessCeiling = ceiling;
+	return ceiling;
+}
+
+/**
+ * Build config from explicit base/project layer objects (tests + programmatic use).
+ * Mirrors loadConfig layering: base → capture ceiling → project (min-only).
+ */
+export function buildConfigFromLayers(
+	baseLayers: Array<Record<string, unknown> | null | undefined> = [],
+	projectLayers: Array<Record<string, unknown> | null | undefined> = [],
+): MetaLoopConfig {
+	const merged = cloneDefault();
+	for (const layer of baseLayers) applyLayer(merged, layer ?? null, "base");
+	captureSfhAccessCeiling(merged);
+	for (const layer of projectLayers) applyLayer(merged, layer ?? null, "project");
+	return merged;
 }
 
 export function loadConfig(cwd: string): MetaLoopConfig {
@@ -261,6 +381,8 @@ export function loadConfig(cwd: string): MetaLoopConfig {
 	// base layers (may expand from defaults)
 	applyLayer(merged, readJsonIfExists(path.join(repoRoot(), "config", "meta-loop.json")), "base");
 	applyLayer(merged, readJsonIfExists(path.join(userDir, "config.json")), "base");
+	// Freeze user/global access ceilings before project layers (project may only narrow).
+	captureSfhAccessCeiling(merged);
 	// legacy project first, then folder form (folder wins)
 	const legacy = readJsonIfExists(path.join(cwd, CONFIG_DIR_NAME, "meta-loop.json"));
 	const folder = readJsonIfExists(path.join(projectDir, "config.json"));
@@ -346,21 +468,50 @@ export function resolveSfhIntegrateEffort(config: MetaLoopConfig): string | unde
 	return undefined;
 }
 
-/** Branch access: branch > tool map > sfhAccess > read */
-export function resolveSfhBranchAccess(branch: { tool?: string; access?: string }, config: MetaLoopConfig): string {
-	if (branch.access?.trim()) return normalizeAccess(branch.access);
-	const tool = branch.tool ?? "pi";
-	const v = config.executor.sfhToolAccess?.[tool];
-	if (v?.trim()) return normalizeAccess(v);
-	if (config.executor.sfhAccess?.trim()) return normalizeAccess(config.executor.sfhAccess);
-	return "read";
+/**
+ * Effective base ceiling for a branch/tool: tool-specific ceiling if present, else sfhAccess ceiling.
+ * Without a captured ceiling, returns undefined (no extra clamp — preserves legacy callers).
+ */
+function branchAccessCeiling(config: MetaLoopConfig, tool: string): string | undefined {
+	const ceil = config.sfhAccessCeiling;
+	if (!ceil) return undefined;
+	const toolCeil = ceil.sfhToolAccess?.[tool];
+	if (typeof toolCeil === "string" && toolCeil.trim()) return normalizeAccess(toolCeil);
+	return normalizeAccess(ceil.sfhAccess ?? "read");
 }
 
-/** Integrate access: sfhIntegrateAccess > sfhAccess > read */
+function integrateAccessCeiling(config: MetaLoopConfig): string | undefined {
+	const ceil = config.sfhAccessCeiling;
+	if (!ceil) return undefined;
+	return normalizeAccess(ceil.sfhIntegrateAccess ?? "read");
+}
+
+/** Branch access: branch > tool map > sfhAccess > read, then min with base ceiling (no escalation). */
+export function resolveSfhBranchAccess(branch: { tool?: string; access?: string }, config: MetaLoopConfig): string {
+	const tool = branch.tool ?? "pi";
+	let resolved: string;
+	if (branch.access?.trim()) {
+		resolved = normalizeAccess(branch.access);
+	} else {
+		const v = config.executor.sfhToolAccess?.[tool];
+		if (v?.trim()) resolved = normalizeAccess(v);
+		else if (config.executor.sfhAccess?.trim()) resolved = normalizeAccess(config.executor.sfhAccess);
+		else resolved = "read";
+	}
+	const ceiling = branchAccessCeiling(config, tool);
+	if (ceiling === undefined) return resolved;
+	return minAccess(resolved, ceiling);
+}
+
+/** Integrate access: sfhIntegrateAccess > sfhAccess > read, then min with base integrate ceiling. */
 export function resolveSfhIntegrateAccess(config: MetaLoopConfig): string {
-	if (config.executor.sfhIntegrateAccess?.trim()) return normalizeAccess(config.executor.sfhIntegrateAccess);
-	if (config.executor.sfhAccess?.trim()) return normalizeAccess(config.executor.sfhAccess);
-	return "read";
+	let resolved: string;
+	if (config.executor.sfhIntegrateAccess?.trim()) resolved = normalizeAccess(config.executor.sfhIntegrateAccess);
+	else if (config.executor.sfhAccess?.trim()) resolved = normalizeAccess(config.executor.sfhAccess);
+	else resolved = "read";
+	const ceiling = integrateAccessCeiling(config);
+	if (ceiling === undefined) return resolved;
+	return minAccess(resolved, ceiling);
 }
 
 function normalizeAccess(a: string): string {
@@ -370,10 +521,12 @@ function normalizeAccess(a: string): string {
 }
 
 export function assertSfhToolAllowed(tool: string | undefined, config: MetaLoopConfig): string | null {
-	const list = config.executor.sfhAllowedTools ?? [];
-	if (list.length === 0) return null;
+	const list = config.executor.sfhAllowedTools;
+	if (list === undefined) return null;
 	const t = tool ?? "pi";
-	if (!list.includes(t)) return `sfh tool "${t}" is not allowed (allowed: ${list.join(", ")})`;
+	if (!list.includes(t)) {
+		return `sfh tool "${t}" is not allowed (allowed: ${list.length > 0 ? list.join(", ") : "none"})`;
+	}
 	return null;
 }
 

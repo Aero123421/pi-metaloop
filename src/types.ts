@@ -19,7 +19,8 @@ export type BoardPhase =
 	| "done"
 	| "stopped"
 	| "incomplete"
-	| "degraded";
+	| "degraded"
+	| "plan_failed";
 
 /** Parallel group branch */
 export interface Branch {
@@ -94,6 +95,8 @@ export interface TaskBoard {
 	tickets: Ticket[];
 	phase: BoardPhase;
 	verdict?: Verdict;
+	/** Full history persisted with the board (survives reload). */
+	verdictHistory?: Verdict[];
 	reviewCount: number;
 }
 

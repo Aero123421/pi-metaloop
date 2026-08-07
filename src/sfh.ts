@@ -77,6 +77,32 @@ export function activeRuns(cwd: string): RunSummary[] {
 	return listRuns(cwd, 20).filter((r) => r.status && (r.status.state === "running" || r.status.state === "stuck"));
 }
 
+/**
+ * Pick an sfh status worth showing next to meta-loop.
+ * - Always prefer live running/stuck
+ * - Terminal states only if finished recently (default 45s) so old failed audits
+ *   do not haunt a new planning run.
+ */
+export function pickSfhForPanel(
+	cwd: string,
+	opts?: { terminalMaxAgeMs?: number; now?: number },
+): SfhStatus | null {
+	const now = opts?.now ?? Date.now();
+	const maxAge = opts?.terminalMaxAgeMs ?? 45_000;
+	const live = activeRuns(cwd)[0]?.status;
+	if (live) return live;
+
+	const recent = listRuns(cwd, 5);
+	for (const r of recent) {
+		const s = r.status;
+		if (!s || s.state === "running" || s.state === "stuck") continue;
+		// Prefer mtime of status.json via run summary
+		const age = now - (r.mtimeMs || 0);
+		if (age >= 0 && age <= maxAge) return s;
+	}
+	return null;
+}
+
 export function formatElapsed(sec: number): string {
 	if (!Number.isFinite(sec) || sec < 0) return "?";
 	if (sec < 60) return `${sec}s`;

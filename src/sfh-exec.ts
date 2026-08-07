@@ -12,10 +12,44 @@ import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Branch, IntegrationContract, Ticket } from "./types.ts";
+import { getProcessTreeTerminationSchedule } from "./process-tree-termination.ts";
 
 // Deliberately not importing CONFIG_DIR_NAME here: this module must load
 // without the pi package (testability). pi uses ".pi" by default.
 const CONFIG_DIR = ".pi";
+const KILL_GRACE_MS = 3000;
+const POST_FORCE_SETTLE_MS = 2000;
+const TREE_POLL_MS = 50;
+
+function isPosixProcessGroupAlive(pid: number | undefined): boolean {
+	if (pid == null || pid <= 0) return false;
+	try {
+		process.kill(-pid, 0);
+		return true;
+	} catch (err) {
+		return (err as NodeJS.ErrnoException).code !== "ESRCH";
+	}
+}
+
+/**
+ * sfh preset tools from `sfh --help`:
+ * "Preset tools: codex, claude, opencode, grok, agy, pi, cursor."
+ * Fixed enum — unknown tools must not reach flow.yaml.
+ */
+export const SFH_PRESET_TOOLS = [
+	"pi",
+	"claude",
+	"codex",
+	"opencode",
+	"grok",
+	"agy",
+	"cursor",
+] as const;
+
+export type SfhPresetTool = (typeof SFH_PRESET_TOOLS)[number];
+
+const SFH_TOOL_SET: ReadonlySet<string> = new Set(SFH_PRESET_TOOLS);
+const SFH_ACCESS_SET: ReadonlySet<string> = new Set(["read", "write", "full"]);
 
 export interface ExecutorOptions {
 	binary: string;
@@ -37,6 +71,34 @@ export function sanitizeId(id: string): string {
 	return cleaned || "task";
 }
 
+/** True when tool is an sfh preset (or undefined → default pi). */
+export function isSfhPresetTool(tool: string | undefined): boolean {
+	const t = (tool ?? "pi").trim();
+	return SFH_TOOL_SET.has(t);
+}
+
+/**
+ * Validate a branch/integrate tool against the fixed sfh preset enum.
+ * Returns null if ok, otherwise an error message.
+ */
+export function validateSfhTool(tool: string | undefined, label = "tool"): string | null {
+	const t = (tool ?? "pi").trim();
+	if (!t) return `${label}: empty tool is not allowed`;
+	if (!SFH_TOOL_SET.has(t)) {
+		return `${label}: unknown sfh tool "${t}" (allowed: ${SFH_PRESET_TOOLS.join(", ")})`;
+	}
+	return null;
+}
+
+/** Validate access before emitting it as a bare YAML scalar. */
+export function validateSfhAccess(access: string | undefined, label = "access"): string | null {
+	const value = access ?? "read";
+	if (!SFH_ACCESS_SET.has(value)) {
+		return `${label}: invalid sfh access ${JSON.stringify(value)} (allowed: read, write, full)`;
+	}
+	return null;
+}
+
 /** Indent a block-scalar body for YAML `prompt: |`. */
 function yamlBlock(text: string, indent: number): string {
 	const pad = " ".repeat(indent);
@@ -45,6 +107,11 @@ function yamlBlock(text: string, indent: number): string {
 		.split("\n")
 		.map((line) => (line.length > 0 ? pad + line : ""))
 		.join("\n");
+}
+
+/** JSON-string quote for free YAML scalars (name/model/effort/id). */
+function yamlQuoted(value: string): string {
+	return JSON.stringify(value);
 }
 
 export interface FlowSpec {
@@ -69,16 +136,45 @@ export interface FlowSpec {
 	maxParallel: number;
 }
 
-/** Generate a deterministic, schema-friendly sfh flow definition. */
+/**
+ * Generate a deterministic, schema-friendly sfh flow definition.
+ * Throws if any branch/integrate tool is outside the fixed sfh preset enum
+ * (flow is not generated).
+ */
 export function generateFlowYaml(spec: FlowSpec): string {
+	for (const branch of spec.branches) {
+		const toolError = validateSfhTool(branch.tool, `branch ${branch.id}`);
+		if (toolError) throw new Error(toolError);
+		const accessError = validateSfhAccess(branch.access, `branch ${branch.id} access`);
+		if (accessError) throw new Error(accessError);
+	}
+	{
+		const toolError = validateSfhTool(spec.integrationTool, "integrate");
+		if (toolError) throw new Error(toolError);
+		const accessError = validateSfhAccess(spec.integrationAccess, "integrate access");
+		if (accessError) throw new Error(accessError);
+		if (spec.defaultAccess !== undefined) {
+			const defaultAccessError = validateSfhAccess(spec.defaultAccess, "defaults access");
+			if (defaultAccessError) throw new Error(defaultAccessError);
+		}
+	}
+	if (!Number.isFinite(spec.timeoutSec) || spec.timeoutSec <= 0) {
+		throw new Error("timeoutSec must be a positive finite number");
+	}
+	if (!Number.isFinite(spec.maxParallel) || spec.maxParallel <= 0) {
+		throw new Error("maxParallel must be a positive finite number");
+	}
+
 	const lines: string[] = [];
 	lines.push(`api_version: 1`);
-	lines.push(`name: ${spec.name}`);
+	// Free scalars must be JSON-quoted (hostile newlines / ": " / injection).
+	lines.push(`name: ${yamlQuoted(spec.name)}`);
 	lines.push(`defaults:`);
 	lines.push(`  timeout_sec: ${spec.timeoutSec}`);
 	lines.push(`  max_parallel: ${Math.max(1, spec.maxParallel)}`);
-	if (spec.defaultModel) lines.push(`  model: ${JSON.stringify(spec.defaultModel)}`);
-	if (spec.defaultEffort) lines.push(`  effort: ${JSON.stringify(spec.defaultEffort)}`);
+	if (spec.defaultModel) lines.push(`  model: ${yamlQuoted(spec.defaultModel)}`);
+	if (spec.defaultEffort) lines.push(`  effort: ${yamlQuoted(spec.defaultEffort)}`);
+	// access/tool stay bare after enum validation (runtime tests match /access: read/).
 	if (spec.defaultAccess) lines.push(`  access: ${spec.defaultAccess}`);
 	lines.push(`  env:`);
 	lines.push(`    PI_META_LOOP_DEPTH: "1"`);
@@ -87,19 +183,21 @@ export function generateFlowYaml(spec: FlowSpec): string {
 	lines.push(`  - id: fanout`);
 	lines.push(`    parallel:`);
 	for (const branch of spec.branches) {
-		lines.push(`      - id: ${branch.id}`);
-		lines.push(`        tool: ${branch.tool ?? "pi"}`);
-		if (branch.model) lines.push(`        model: ${JSON.stringify(branch.model)}`);
-		if (branch.effort) lines.push(`        effort: ${JSON.stringify(branch.effort)}`);
+		const tool = (branch.tool ?? "pi").trim();
+		lines.push(`      - id: ${yamlQuoted(branch.id)}`);
+		lines.push(`        tool: ${tool}`);
+		if (branch.model) lines.push(`        model: ${yamlQuoted(branch.model)}`);
+		if (branch.effort) lines.push(`        effort: ${yamlQuoted(branch.effort)}`);
 		lines.push(`        access: ${branch.access ?? "read"}`);
 		lines.push(`        timeout_sec: ${spec.timeoutSec}`);
 		lines.push(`        prompt: |`);
 		lines.push(yamlBlock(branch.prompt, 10));
 	}
+	const integrateTool = (spec.integrationTool ?? "pi").trim();
 	lines.push(`  - id: integrate`);
-	lines.push(`    tool: ${spec.integrationTool ?? "pi"}`);
-	if (spec.integrationModel) lines.push(`    model: ${JSON.stringify(spec.integrationModel)}`);
-	if (spec.integrationEffort) lines.push(`    effort: ${JSON.stringify(spec.integrationEffort)}`);
+	lines.push(`    tool: ${integrateTool}`);
+	if (spec.integrationModel) lines.push(`    model: ${yamlQuoted(spec.integrationModel)}`);
+	if (spec.integrationEffort) lines.push(`    effort: ${yamlQuoted(spec.integrationEffort)}`);
 	lines.push(`    access: ${spec.integrationAccess ?? "read"}`);
 	lines.push(`    timeout_sec: ${spec.timeoutSec}`);
 	lines.push(`    prompt: |`);
@@ -129,7 +227,7 @@ export function renderBranchPrompt(branch: Branch, ticket: Ticket, userGoal: str
 export function renderIntegrationPrompt(ticket: Ticket, userGoal: string): string {
 	const acceptance = ticket.integration?.acceptance ?? [];
 	return [
-		"これは統合せきです。並列ブランチの出力を受け取り、単一の統合報告にまとめてください。",
+		"これは統合ステップです。並列ブランチの出力を受け取り、単一の統合報告にまとめてください。",
 		"",
 		"## 統合約（acceptance）",
 		...(acceptance.length > 0 ? acceptance.map((a) => `- ${a}`) : ["- 全ブランチの出力を網羅する"]),
@@ -197,6 +295,58 @@ export function findRunDirForFlow(cwd: string, flowName: string): { runDir: stri
 	}
 }
 
+/**
+ * Kill an sfh process tree.
+ * - win32: `taskkill /pid <pid> /T /F` when force is requested (full tree)
+ * - POSIX: signal the process group (`-pid`) when spawned detached
+ * Returns true only when the tree/group signal itself succeeded.
+ */
+export function killSfhProcessTree(
+	proc: { pid?: number; kill: (signal?: NodeJS.Signals | number) => boolean },
+	opts: { force?: boolean; platform?: NodeJS.Platform } = {},
+): boolean {
+	const platform = opts.platform ?? process.platform;
+	const force = opts.force === true;
+	const pid = proc.pid;
+	if (pid == null || pid <= 0) return false;
+
+	if (platform === "win32") {
+		// Managed callers force once, synchronously, before the event loop can
+		// observe close and make this direct-child PID eligible for reuse.
+		try {
+			const result = spawnSync(
+				"taskkill",
+				["/pid", String(pid), "/T", ...(force ? ["/F"] : [])],
+				{ stdio: "ignore", windowsHide: true, timeout: 15_000 },
+			);
+			if (result.error || result.status !== 0) throw result.error ?? new Error(`taskkill exit ${result.status}`);
+			return true;
+		} catch {
+			try {
+				proc.kill(force ? "SIGKILL" : "SIGTERM");
+			} catch {
+				/* direct child is already gone */
+			}
+			// A direct-child fallback is not confirmation that the tree was killed.
+			return false;
+		}
+	}
+
+	// POSIX: prefer process-group kill (spawned with detached:true → new group leader).
+	const sig: NodeJS.Signals = force ? "SIGKILL" : "SIGTERM";
+	try {
+		process.kill(-pid, sig);
+		return true;
+	} catch {
+		try {
+			proc.kill(sig);
+		} catch {
+			/* direct child is already gone */
+		}
+		return false;
+	}
+}
+
 /** Run an sfh flow in the foreground. stdout carries the integrated result. */
 export function runSfhFlow(opts: {
 	binary: string;
@@ -208,20 +358,49 @@ export function runSfhFlow(opts: {
 	wallClockSec?: number;
 	onProgress?: (chunk: string) => void;
 }): Promise<SfhRunResult> {
+	if (opts.signal?.aborted) {
+		return Promise.resolve({ exitCode: 1, stdout: "", stderr: "aborted before sfh spawn" });
+	}
 	return new Promise((resolve) => {
 		const depth = Number.parseInt(process.env.PI_META_LOOP_DEPTH ?? "0", 10) || 0;
+		const terminationSchedule = getProcessTreeTerminationSchedule(
+			process.platform,
+			KILL_GRACE_MS,
+		);
+		const isWin = process.platform === "win32";
+		// POSIX: new process group so we can kill(-pid) the whole tree on abort.
 		const proc = spawn(opts.binary, ["run", opts.flowFile], {
 			cwd: opts.cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
 			env: { ...process.env, PI_META_LOOP_DEPTH: String(depth + 1) },
+			detached: !isWin,
+			windowsHide: true,
 		});
 		let stdout = "";
 		let stderr = "";
 		let settled = false;
+		let aborted = false;
+		let timedOut = false;
+		let terminationStarted = false;
+		let directChildClosed = false;
+		let killTimer: ReturnType<typeof setTimeout> | undefined;
+		let wallTimer: ReturnType<typeof setTimeout> | undefined;
+		let postForceTimer: ReturnType<typeof setTimeout> | undefined;
+
+		const clearTimers = () => {
+			if (killTimer !== undefined) clearTimeout(killTimer);
+			if (wallTimer !== undefined) clearTimeout(wallTimer);
+			if (postForceTimer !== undefined) clearTimeout(postForceTimer);
+			killTimer = undefined;
+			wallTimer = undefined;
+			postForceTimer = undefined;
+		};
 		const finish = (exitCode: number) => {
 			if (settled) return;
 			settled = true;
+			clearTimers();
+			opts.signal?.removeEventListener("abort", onAbort);
 			const run = findRunDirForFlow(opts.cwd, opts.flowName);
 			resolve({
 				exitCode,
@@ -232,6 +411,64 @@ export function runSfhFlow(opts: {
 				elapsedSec: run?.elapsedSec,
 			});
 		};
+		const waitAfterForce = (forceSucceeded: boolean) => {
+			// Windows taskkill is synchronous and this is now only settlement: close
+			// or the bound can finish it, and neither path signals the numeric PID.
+			if (isWin) {
+				if (directChildClosed && forceSucceeded) {
+					finish(1);
+					return;
+				}
+				postForceTimer = setTimeout(() => finish(1), POST_FORCE_SETTLE_MS);
+				return;
+			}
+
+			const deadline = Date.now() + POST_FORCE_SETTLE_MS;
+			const poll = () => {
+				if (settled) return;
+				if ((directChildClosed && !isPosixProcessGroupAlive(proc.pid)) || Date.now() >= deadline) {
+					finish(1);
+					return;
+				}
+				postForceTimer = setTimeout(poll, TREE_POLL_MS);
+			};
+			poll();
+		};
+		const startTermination = () => {
+			if (terminationStarted) return;
+			terminationStarted = true;
+			if (wallTimer !== undefined) {
+				clearTimeout(wallTimer);
+				wallTimer = undefined;
+			}
+
+			const [initialStep, delayedStep] = terminationSchedule;
+			const initialSucceeded = killSfhProcessTree(proc, { force: initialStep.force });
+			if (delayedStep === undefined) {
+				// Windows: /T /F ran synchronously in this abort/timeout callback while
+				// proc still denotes the owned direct child. Never retain its PID for a
+				// delayed second taskkill; only bounded settlement remains.
+				waitAfterForce(initialSucceeded);
+				return;
+			}
+
+			// POSIX only: preserve TERM followed by delayed KILL of the owned group,
+			// even if the sfh direct child closes during the grace period.
+			killTimer = setTimeout(() => {
+				killTimer = undefined;
+				const forceSucceeded = isPosixProcessGroupAlive(proc.pid)
+					? killSfhProcessTree(proc, { force: delayedStep.force })
+					: true;
+				waitAfterForce(forceSucceeded);
+			}, delayedStep.delayMs);
+		};
+		const onAbort = () => {
+			if (aborted) return;
+			aborted = true;
+			stderr += "\n[pi-meta-loop] sfh aborted\n";
+			startTermination();
+		};
+
 		proc.stdout.on("data", (c: Buffer) => {
 			stdout += c.toString("utf-8");
 			if (stdout.length > 2_000_000) stdout = stdout.slice(-1_000_000);
@@ -242,43 +479,29 @@ export function runSfhFlow(opts: {
 			if (stderr.length > 500_000) stderr = stderr.slice(-250_000);
 			opts.onProgress?.(text.slice(-300));
 		});
-		let killTimer: ReturnType<typeof setTimeout> | undefined;
-		let wallTimer: ReturnType<typeof setTimeout> | undefined;
-		const killSoft = () => {
-			try {
-				proc.kill("SIGTERM");
-			} catch {
-				/* */
-			}
-			killTimer = setTimeout(() => {
-				try {
-					proc.kill("SIGKILL");
-				} catch {
-					/* */
-				}
-			}, 3000);
-		};
-		const onAbort = () => killSoft();
 		opts.signal?.addEventListener("abort", onAbort);
+		if (opts.signal?.aborted) onAbort();
 		if (opts.wallClockSec && opts.wallClockSec > 0) {
 			wallTimer = setTimeout(() => {
+				timedOut = true;
 				stderr += `\n[pi-meta-loop] sfh wall clock exceeded (${opts.wallClockSec}s)\n`;
-				killSoft();
+				startTermination();
 			}, opts.wallClockSec * 1000);
 		}
 		proc.on("close", (code, signal) => {
-			opts.signal?.removeEventListener("abort", onAbort);
-			if (killTimer) clearTimeout(killTimer);
-			if (wallTimer) clearTimeout(wallTimer);
+			directChildClosed = true;
+			// Windows has already completed its only PID-based tree kill. POSIX close
+			// must not cancel the delayed signal to the owned process group.
+			if (terminationStarted) {
+				if (isWin && postForceTimer !== undefined) finish(1);
+				return;
+			}
 			if (code === null && signal) finish(1);
 			else finish(code ?? 1);
 		});
 		proc.on("error", (err) => {
-			opts.signal?.removeEventListener("abort", onAbort);
-			if (killTimer) clearTimeout(killTimer);
-			if (wallTimer) clearTimeout(wallTimer);
 			stderr += `\n${err.message}`;
-			finish(1);
+			if (!terminationStarted) finish(1);
 		});
 	});
 }

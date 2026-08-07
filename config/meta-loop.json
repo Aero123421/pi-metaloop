@@ -11,7 +11,7 @@
 		},
 		"worker": {
 			"model": "",
-			"tools": ["read", "write", "edit", "ls", "find", "grep"]
+			"tools": ["read", "write", "edit", "ls", "find", "grep", "bash"]
 		}
 	},
 	"supervisor": {
@@ -33,8 +33,7 @@
 		"sfhIntegrateEffort": "",
 		"sfhAccess": "read",
 		"sfhToolAccess": {},
-		"sfhIntegrateAccess": "read",
-		"sfhAllowedTools": []
+		"sfhIntegrateAccess": "read"
 	},
 	"escalation": {
 		"enabled": true,

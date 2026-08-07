@@ -225,14 +225,21 @@ Implementation tickets stay native (Worker pi subprocesses). Groups are for para
 ## Commands & UX
 
 - The Primary calls `orchestrate` itself for long tasks; ask explicitly if you want it ("this is a long task, use orchestrate").
-- `/tasks` — show the current task board
+- **TUI runs orchestrate in the background by default** — the tool returns immediately so you can keep chatting. On completion a `meta-loop-result` message is injected as followUp (`triggerTurn`).
+- Pass `background: false` to wait synchronously (print/json modes are always sync).
+- `/tasks` — live or last task board
 - `/verdicts` — Supervisor verdict history
-- `/sfh` — list recent sfh runs and inspect one; `/sfh stop` stops the newest run
-- Footer shows a thin status line while supervised: `supervised executing 3 tasks ●1 ✓2 verdict:green`
-- Soft escalation: if the Primary session accumulates many tool calls / file touches / writes, or the user prompt looks like a long brief, pi-metaLoop nudges once to consider `orchestrate` (never forces it)
-- If an sfh flow is running in the project, the footer shows live progress (`sfh:<flow> ●running step:<id> fanout 2/3 $0.31 12m`) and a widget appears above the editor. Runs started outside pi are visible too; `stuck` runs always notify.
+- `/ml-stop` — abort the active supervised run
+- `/ml-runs` — list on-disk runs under `.pi/meta-loop/runs/`
+- `/sfh` — list/inspect sfh runs; `/sfh stop` stops the newest
+- While supervised: **unified colored panel** (meta-loop + sfh) below the editor + rich footer
+- `/ml-ui` — cycle panel detail `compact|normal|full` (or `show`/`hide`); shortcut `ctrl+shift+m`
+- Finished runs **auto-hide** after ~90s (no more sticky 28m “stopped” ghosts); `/tasks` forces show
+- Role subprocess tasks are sent on **stdin** (avoids Windows `ENAMETOOLONG`)
+- Soft escalation: many tool calls / file touches / writes, or a long user brief, nudges once toward `orchestrate` (never forces it)
+- sfh flows also get footer + widget; `stuck` always notifies
 
-Users see one conversation. Internal chatter is not surfaced — only the plan, detected misalignments, decisions that truly need you, and final results.
+Internal play-by-play stays in the widget. Chat gets plan, decisions that need you, and the final summary.
 
 ## Development
 
@@ -244,7 +251,7 @@ npm run typecheck    # tsc --noEmit (strict)
 ## Security (alpha)
 
 - Orchestrator / Supervisor default tools are **read-only** (no bash).
-- Worker default tools are read/write/edit without bash; `allowed_scope` is enforced on write/edit **and** checked after run via `git` dirty files when possible.
+- Worker default tools are read/write/edit/**bash**; `allowed_scope` is enforced on write/edit **and** checked after run via `git` dirty files when possible. Project config may remove bash.
 - sfh parallel groups default to `access: read`; set `executor.sfhAccess` / `sfhToolAccess` / `sfhIntegrateAccess` to `write` or **`full`** in **user** config when needed (project config can only narrow, not raise).
 - Project config may only **narrow** capabilities relative to user/defaults (cannot raise sfh access, swap sfhBinary, or expand tool allow-lists past the user ceiling).
 - Project `standards.md` is treated as **untrusted criteria data** in prompts.
@@ -259,6 +266,12 @@ npm run typecheck    # tsc --noEmit (strict)
 - [x] sfh TUI monitor — live `status.json` polling, footer/widget, `/sfh` command, nesting guard
 - [x] Phase 2.5 — sfh execution backend: group tickets, integration contract, flow.yaml generation, result collection
 - [x] Hardening — docs cleanup, sfh ticket validation, allowed_scope guard, soft long-task escalation
+- [x] 0.2.1 — background orchestrate, TUI widget, board persistence, stdin tasks (ENAMETOOLONG fix)
+- [x] 0.2.2 — worker bash default, plan_failed/incomplete semantics, plan retry+raw logs, frozen elapsed
+- [x] 0.2.3 — unified color TUI panel (ML+sfh), detail modes, auto-hide finished, spinner footer
+- [x] 0.2.4 — delta scope evidence, STOP file unlock, force orchestrate, sfh ghost filter, integrate access/tool fix
+- [x] 0.2.5 — compact mid-review, verdictHistory, smaller plans, /tasks drill-down, user sfh full ceiling
+- [x] 0.2.6 — real globstar scope matching, including directory entries for `**/tests/**`
 - [ ] Phase 3 — harness diagnosis (repeated failures → rules/skills/prompts weaknesses)
 - [ ] Phase 4 — evolution loop (logs + scores, external improver) — research-grade, optional
 

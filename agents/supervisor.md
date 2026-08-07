@@ -31,6 +31,12 @@ tools: read,ls,find,grep
 - **yellow**: 修正した方が良い問題がある。orchestrator_guidance で改善指示を出す（進行は止めない）。
 - **red**: 重大な認識違い・破壊的操作・要求漏れ・大規模な重複。停止すべき。
 
+## MID-RUN 監査のとき
+- ボードは compact で渡る。**失敗/ブロック中のチケットと次の一手**に集中する。
+- observations は最大5、required_actions / orchestrator_guidance は最大4・各1〜2文。
+- 全体ロードマップの再説教をしない。環境設定エラー（codex config 等）は Worker 技量ではないと明記する。
+- green なら guidance を空にする。
+
 ## orchestrator_guidance の書き方
 - 具体的で行動に変換できる文にする（「しっかり考えて」ではなく「未カバーの領域を列挙し、チケットを追加または統合せよ」のように）。
 - 例: 「研究の網羅性が落ちている。一度全体を俯瞰し、未調査の観点と既存チケットの対応表を作れ」

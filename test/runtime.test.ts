@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { checkPath, matchRule } from "../src/evidence.ts";
-import { validatePlanGraph, validateTicket, formatBoardForSupervisor, buildPrimarySummary } from "../src/runtime.ts";
+import { checkPath, matchRule, deltaChangedFiles, ticketChangedFiles } from "../src/evidence.ts";
+import {
+	validatePlanGraph,
+	validateTicket,
+	formatBoardForSupervisor,
+	buildPrimarySummary,
+	resolveTerminalPhase,
+} from "../src/runtime.ts";
+import { runElapsed, runStatusFromPhase } from "../src/board-store.ts";
 import { generateFlowYaml } from "../src/sfh-exec.ts";
 import type { TaskBoard, Ticket } from "../src/types.ts";
 import { evaluateTriggers } from "../src/triggers.ts";
@@ -61,6 +68,20 @@ describe("ticket validation", () => {
 		);
 		assert.equal(err, null);
 	});
+	// P0 fail-closed: empty write scope must not run as native implementation work
+	it("rejects native ticket with empty allowed_scope", () => {
+		const err = validateTicket(baseTicket({ execution: "native", allowed_scope: [] }));
+		assert.ok(err);
+		assert.match(err!, /allowed_scope/);
+	});
+	it("rejects native ticket when allowed_scope omitted (defaults empty)", () => {
+		const t = baseTicket();
+		t.allowed_scope = [];
+		delete (t as { execution?: string }).execution;
+		const err = validateTicket(t);
+		assert.ok(err);
+		assert.match(err!, /allowed_scope/);
+	});
 });
 
 describe("plan graph", () => {
@@ -99,6 +120,23 @@ describe("scope", () => {
 	});
 	it("matchRule directory", () => {
 		assert.equal(matchRule("src/a/b", "/x/src/a/b", "src/a/**"), true);
+		assert.equal(matchRule("src/a", "/x/src/a", "src/a/**"), true);
+	});
+
+	it("matches globstar segments and their directory entries", () => {
+		const rule = "crates/**/tests/**";
+		assert.equal(matchRule("crates/ownmesh-broker/tests", "/p/crates/ownmesh-broker/tests", rule), true);
+		assert.equal(matchRule("crates/ownmesh-broker/tests/", "/p/crates/ownmesh-broker/tests/", rule), true);
+		assert.equal(
+			matchRule("crates/ownmesh-broker/tests/security_boundary.rs", "/p/crates/ownmesh-broker/tests/security_boundary.rs", rule),
+			true,
+		);
+		assert.equal(matchRule("crates/ownmesh-broker/src/lib.rs", "/p/crates/ownmesh-broker/src/lib.rs", rule), false);
+	});
+
+	it("supports single-star path segments", () => {
+		assert.equal(matchRule("crates/a/tests/x.rs", "/p/crates/a/tests/x.rs", "crates/*/tests/**"), true);
+		assert.equal(matchRule("crates/a/nested/tests/x.rs", "/p/crates/a/nested/tests/x.rs", "crates/*/tests/**"), false);
 	});
 });
 
@@ -135,6 +173,27 @@ describe("supervisor board payload", () => {
 		assert.match(s, /test passes/);
 		assert.match(s, /allowed_scope/);
 	});
+
+	it("compact mode omits long reports", () => {
+		const board: TaskBoard = {
+			goal: "g",
+			planSummary: "p".repeat(100),
+			openQuestions: [],
+			phase: "executing",
+			reviewCount: 2,
+			tickets: [
+				baseTicket({
+					report: "HUGE_REPORT_" + "x".repeat(5000),
+					claim: { claimedStatus: "done", notes: "n" },
+				}),
+			],
+		};
+		const full = formatBoardForSupervisor(board);
+		const compact = formatBoardForSupervisor(board, { compact: true });
+		assert.match(full, /HUGE_REPORT/);
+		assert.doesNotMatch(compact, /HUGE_REPORT/);
+		assert.ok(compact.length < full.length);
+	});
 });
 
 describe("primary summary", () => {
@@ -156,5 +215,65 @@ describe("primary summary", () => {
 		const s = buildPrimarySummary(board, [{ verdict: "green", observations: [], risk: [], required_actions: [], optional_advice: [], affected_tasks: [], harness_suggestions: [] }]);
 		assert.match(s, /changed_files \(observed\)/);
 		assert.match(s, /src\/a\.ts/);
+	});
+});
+
+describe("terminal phase semantics", () => {
+	const boardOf = (statuses: Ticket["status"][], phase: TaskBoard["phase"] = "executing"): TaskBoard => ({
+		goal: "g",
+		planSummary: "p",
+		openQuestions: [],
+		phase,
+		reviewCount: 0,
+		tickets: statuses.map((status, i) => baseTicket({ id: `t${i}`, status, acceptance: ["a"] })),
+	});
+
+	it("all blocked is incomplete, not done", () => {
+		assert.equal(resolveTerminalPhase(boardOf(["blocked", "blocked"]), false), "incomplete");
+		assert.equal(runStatusFromPhase("incomplete", false), "incomplete");
+	});
+
+	// P0 semantics change (not a weakened assertion): partial never counts as full success.
+	// Old expectation was resolveTerminalPhase(done+partial)="done"; new spec → "incomplete".
+	it("all-done only is done; done+partial is incomplete (P0)", () => {
+		assert.equal(resolveTerminalPhase(boardOf(["done", "done"]), false), "done");
+		assert.equal(runStatusFromPhase("done", false), "done");
+		assert.equal(resolveTerminalPhase(boardOf(["done", "partial"]), false), "incomplete");
+		assert.equal(runStatusFromPhase("incomplete", false), "incomplete");
+	});
+
+	it("empty tickets is plan_failed", () => {
+		assert.equal(resolveTerminalPhase(boardOf([], "planning"), false), "plan_failed");
+		assert.equal(runStatusFromPhase("plan_failed", false), "error");
+	});
+
+	it("abort wins", () => {
+		assert.equal(resolveTerminalPhase(boardOf(["running"]), true), "stopped");
+		assert.equal(runStatusFromPhase("stopped", true), "stopped");
+	});
+
+	it("elapsed freezes after finishedAt", () => {
+		const started = "2026-01-01T00:00:00.000Z";
+		const finished = "2026-01-01T00:02:00.000Z";
+		const a = runElapsed({ startedAt: started, finishedAt: finished, updatedAt: finished, status: "incomplete" });
+		const b = runElapsed({ startedAt: started, finishedAt: finished, updatedAt: finished, status: "incomplete" });
+		assert.equal(a, b);
+		assert.equal(a, "2m00s");
+	});
+});
+
+describe("scope delta evidence", () => {
+	it("ignores pre-existing dirty files", () => {
+		const before = new Set(["docs/ENV_SMOKE_CHECK.md", "README.md"]);
+		const after = ["docs/ENV_SMOKE_CHECK.md", "README.md", "docs/DOD_1.0.md"];
+		const delta = ticketChangedFiles(before, after);
+		assert.deepEqual(delta, ["docs/DOD_1.0.md"]);
+	});
+
+	it("empty delta when nothing new — not full dirty tree", () => {
+		const before = new Set(["docs/ENV_SMOKE_CHECK.md"]);
+		const after = ["docs/ENV_SMOKE_CHECK.md"];
+		assert.deepEqual(deltaChangedFiles(before, after), []);
+		// Old bug: fall back to `after` would false-flag ENV_SMOKE as this ticket's write
 	});
 });

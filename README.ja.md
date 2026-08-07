@@ -205,14 +205,21 @@ runtime は `flow.yaml` を生成（`.pi/meta-loop/flows/` に保存）し、`PI
 ## コマンドと UX
 
 - 長期タスクは Primary が自分で `orchestrate` を呼ぶ。使わせたい場合は「長期タスクなので orchestrate で」と明示すればよい
-- `/tasks` — タスクボード表示
+- **TUI では orchestrate はデフォルト background** — 起動直後に tool が return し、メイン会話をブロックしない。完了時に `meta-loop-result` が followUp 注入される
+- 同期実行が必要なら `background: false`（print/json モードは自動で同期）
+- `/tasks` — ライブ or 直近のタスクボード
 - `/verdicts` — Supervisor の判定履歴
-- `/sfh` — このプロジェクトの sfh 実行履歴を一覧・詳細表示。`/sfh stop` で最新の run を停止
-- supervised 中はフッターに薄いステータス: `supervised executing 3 tasks ●1 ✓2 verdict:green`
-- **ソフトな途中昇格**: Primary セッションで tool 回数・パス数・write 数、または長い要求文を検知すると、一度だけ `orchestrate` 検討を notify + コンテキスト注入する（強制はしない）
-- プロジェクトで sfh フローが動いている間は、フッターにライブ進捗とエディタ上ウィジェットを表示。stuck は必ず通知
+- `/ml-stop` — 実行中の supervised run を中断
+- `/ml-runs` — ディスク上の run 履歴（`.pi/meta-loop/runs/`）
+- `/sfh` — sfh 実行履歴。`/sfh stop` で最新 run 停止
+- supervised 中は **色付き統合パネル**（meta-loop + sfh）とフッターで進捗表示
+- `/ml-ui` — 詳細度 `compact|normal|full`（`show`/`hide` 可）。ショートカット `ctrl+shift+m`
+- 終了 run は約90秒で **自動非表示**（stopped が永遠に残らない）。`/tasks` で再表示
+- 役サブプロセスの task は **stdin** 渡し（Windows の ENAMETOOLONG を回避）
+- **ソフトな途中昇格**: tool 回数・パス数・write 数、または長い要求文で一度だけ `orchestrate` 検討を nudge（強制しない）
+- sfh フロー実行中もフッター + ウィジェット。stuck は必ず通知
 
-ユーザーに見える会話は一本。内部実況は出さず、計画・認識ズレの修正・本当に必要な判断・完了物だけを表に出す。
+内部実況はウィジェット側。チャット本文には計画・必要な判断・完了サマリを出す。
 
 ## 開発
 
@@ -234,6 +241,12 @@ npm run typecheck    # tsc --noEmit (strict)
 - [x] sfh TUI モニター — status.json ポーリング / フッター・ウィジェット / `/sfh` / 入れ子ガード
 - [x] Phase 2.5 — sfh 実行バックエンド：グループチケット・統合約・flow.yaml 生成・結果回収
 - [x] 硬化 — ドキュメント掃除、sfh チケット検証、allowed_scope ガード、ソフト長期エスカレーション
+- [x] 0.2.1 — background orchestrate / TUI widget / board 永続化 / stdin task（ENAMETOOLONG 修正）
+- [x] 0.2.2 — Worker 既定 bash、plan_failed/incomplete、plan リトライ+raw 保存、elapsed 固定
+- [x] 0.2.3 — ML+sfh 統合カラー TUI、詳細度切替、終了 auto-hide、スピナーフッター
+- [x] 0.2.4 — scope delta のみ、STOP ファイル解除、force orchestrate、sfh ゴースト除去、integrate access/tool 修正
+- [x] 0.2.5 — mid-review compact、verdictHistory、短い計画、/tasks ドリルダウン、user sfh full 天井
+- [x] 0.2.6 — globstar scope 判定（`**/tests/**` のディレクトリ自体も許可）
 - [ ] Phase 3 — ハーネス診断（反復障害から rules/skills/prompts の弱点指摘）
 - [ ] Phase 4 — 進化ループ（ログとスコアの蓄積、外側 improver）— 研究寄り、任意
 
