@@ -252,4 +252,13 @@ describe("scope-guard bash git blocks", () => {
 		assert.equal(isBlockedGitBashCommand("npm test"), false);
 		assert.equal(isBlockedGitBashCommand("echo git commit"), false);
 	});
+
+	it("blocks git file-output and helper/pager injection side channels", () => {
+		assert.equal(isBlockedGitBashCommand("git diff --output=.git/config HEAD"), true);
+		assert.equal(isBlockedGitBashCommand("git diff --no-index --output=pwned /dev/null README.md"), true);
+		assert.equal(isBlockedGitBashCommand("git -c core.pager=evil log -1"), true);
+		assert.equal(isBlockedGitBashCommand("git -ccore.pager=evil log -1"), true);
+		assert.equal(isBlockedGitBashCommand("GIT_PAGER=evil git log -1"), true);
+		assert.equal(isBlockedGitBashCommand("env GIT_EXTERNAL_DIFF=evil git diff HEAD"), true);
+	});
 });

@@ -205,6 +205,25 @@ function hasEnvSplitPrefix(input: string[]): boolean {
 function gitWordsAreBlocked(input: string[]): boolean {
 	const words = stripCommandPrefixes(input);
 	if (executableName(words[0] ?? "") !== "git") return false;
+
+	// Env assignments anywhere on the argv (including `env VAR=… git …`) can inject
+	// pagers, external diff drivers, editors, and other child launchers.
+	for (const token of input) {
+		if (!/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)) continue;
+		const name = token.slice(0, token.indexOf("="));
+		if (/^GIT_/iu.test(name) || /^(?:PAGER|EDITOR|VISUAL|LESS|MORE)$/iu.test(name)) return true;
+	}
+
+	// Flags that write files or reconfigure helpers on otherwise "read-only" subcommands.
+	for (let i = 1; i < words.length; i++) {
+		const token = words[i];
+		const lower = token.toLowerCase();
+		if (lower === "--output" || lower.startsWith("--output=")) return true;
+		if (token === "-c" || token === "--config-env" || token.startsWith("--config-env=")) return true;
+		// Combined -cKEY=VAL (but not -C<path>, which only changes cwd).
+		if (/^-c/u.test(token) && !/^-C/u.test(token)) return true;
+	}
+
 	let i = 1;
 	while (i < words.length) {
 		const token = words[i];
@@ -287,23 +306,24 @@ const DETACH_COMMANDS = new Set([
  *
  * Deliberately excluded (code exec / delete / detach / unscoped write):
  * awk (system()), find (-exec/-delete), sed, sort (-o/--output), yq (-i/--inplace),
- * npm/pnpm/yarn/npx and other package/build/test runners, shells and
- * general-purpose interpreters (sh/bash/node/…). Nested `sh -c` is denied at the
- * allowlist gate; no OS sandbox is available here. `tee` remains only because
- * every target is path-checked the same way as shell redirections. `jq` stays
- * (stdout filters only; no in-place/write-file flag). `env` is prefix-stripped
- * and the resulting executable is re-checked. `git` is limited to the read-only
- * subcommand set above. `python` is further restricted to informational flags.
+ * diff (--output), rg/ag/ack (--pre and plugins), less/more (! shell-out),
+ * git (diff --output, -c/GIT_* pager and external-diff child launch — also
+ * blocked in gitWordsAreBlocked), npm/pnpm/yarn/npx and other package/build/test
+ * runners, shells and general-purpose interpreters (sh/bash/node/…). Nested
+ * `sh -c` is denied at the allowlist gate; no OS sandbox is available here.
+ * `tee` remains only because every target is path-checked the same way as shell
+ * redirections. `jq` stays (stdout filters only). `grep`/`egrep`/`fgrep` stay
+ * (no preprocessor/exec flag). `env` is prefix-stripped and the resulting
+ * executable is re-checked. `python` is further restricted to informational flags.
  */
 const BASH_READONLY_ALLOWLIST = new Set([
-	"ls", "dir", "cat", "type", "more", "less", "head", "tail", "wc", "file", "stat",
-	"grep", "egrep", "fgrep", "rg", "ag", "ack",
+	"ls", "dir", "cat", "type", "head", "tail", "wc", "file", "stat",
+	"grep", "egrep", "fgrep",
 	"echo", "printf", "true", "false", "test", "pwd", "whoami", "uname", "hostname", "date",
 	"which", "where", "whereis", "basename", "dirname", "realpath", "readlink", "printenv", "env",
-	"diff", "cmp", "uniq", "cut", "tr", "od", "hexdump", "base64",
+	"cmp", "uniq", "cut", "tr", "od", "hexdump", "base64",
 	"md5sum", "sha1sum", "sha256sum", "cksum", "sum",
 	"jq", "tee",
-	"git",
 ]);
 
 function isBashAllowlistedExecutable(exe: string): boolean {

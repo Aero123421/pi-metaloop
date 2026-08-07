@@ -87,10 +87,10 @@ describe("implementation-worker detached write guard", () => {
 			assert.equal(result.ok, false, command);
 			assert.match(result.reason ?? "", /script|module|hook|fail-closed|allowlist|--test/i, command);
 		}
-		// Read-only allowlist remains usable.
+		// Read-only allowlist remains usable (built-in-oriented; no git/rg/diff).
 		assert.equal(inspect("ls src").ok, true);
-		assert.equal(inspect("git status").ok, true);
-		assert.equal(inspect("rg TODO src").ok, true);
+		assert.equal(inspect("grep TODO src").ok, true);
+		assert.equal(inspect("cat src/scope-guard.ts").ok, true);
 	});
 
 	it("denies non-allowlisted writers that would bypass redirection scope checks", () => {
@@ -125,8 +125,8 @@ describe("implementation-worker detached write guard", () => {
 	});
 
 	it("denies allowlisted-looking writers whose flags bypass redirection path checks", () => {
-		// sort -o / yq -i write without shell redirection, so checkPath never runs.
-		// They are removed from the read-only allowlist entirely (not flag-parsed).
+		// These write or exec without shell redirection, so checkPath never runs.
+		// Removed from the read-only allowlist entirely (not flag-parsed).
 		for (const command of [
 			"sort -o src/out.ts src/in.ts",
 			"sort --output=src/out.ts src/in.ts",
@@ -136,10 +136,23 @@ describe("implementation-worker detached write guard", () => {
 			"yq --inplace '.x=1' src/config.yaml",
 			"sort src/a.ts",
 			"yq '.x' src/config.yaml",
+			// diff --output and git diff --output skip '>' path checks.
+			"diff --output=.git/config /dev/null README.md",
+			"diff --output src/out.ts /dev/null README.md",
+			"git diff --no-index --output=.pi/meta-loop/runs/owner.lock.json /dev/null README.md",
+			"git diff --output=src/out.ts HEAD",
+			// rg --pre launches an arbitrary preprocessor child per match.
+			"rg --pre=sh . src/payload.sh",
+			"rg --pre sh . src/payload.sh",
+			"rg TODO src",
+			"diff -u a b",
+			"git status",
+			"less src/a.ts",
+			"more src/a.ts",
 		]) {
 			const result = inspect(command);
 			assert.equal(result.ok, false, command);
-			assert.match(result.reason ?? "", /allowlist/i, command);
+			assert.match(result.reason ?? "", /allowlist|blocked git|output|config|pager/i, command);
 		}
 	});
 

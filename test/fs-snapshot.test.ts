@@ -222,19 +222,22 @@ describe("bounded implementation-worker filesystem snapshots", () => {
 			assert.equal(bash.ok, false);
 			assert.match(bash.reason ?? "", /outside|allowed_scope|not allowed|scope/i);
 
-			// sort -o / yq -i bypass redirection checkPath; must not be treated as success
+			// Flag-based writers/exec bypass redirection checkPath; must not be success
 			// even when the lexical path looks in-scope via a symlink/junction ancestor.
 			for (const command of [
 				`sort -o ${deep} src/in.ts`,
 				`sort --output=${deep} src/in.ts`,
 				`yq -i '.x=1' ${deep}`,
 				`yq --inplace '.x=1' ${deep}`,
+				`diff --output=${deep} /dev/null README.md`,
+				`git diff --no-index --output=${deep} /dev/null README.md`,
+				`rg --pre=sh . ${deep}`,
 			]) {
 				const sneaky = inspectBashCommand(command, f.cwd, ["src/**"], []);
 				assert.equal(sneaky.ok, false, command);
 				assert.match(
 					sneaky.reason ?? "",
-					/allowlist|outside|allowed_scope|not allowed|scope/i,
+					/allowlist|blocked git|outside|allowed_scope|not allowed|scope/i,
 					command,
 				);
 			}
@@ -271,6 +274,24 @@ describe("implementation-worker bash inspection", () => {
 		assert.equal(inspect("node --test test/unit.test.js").ok, false);
 		assert.equal(inspect("python scripts/check.py").ok, false);
 		assert.equal(inspect("touch ../../escaped").ok, false);
+	});
+
+	it("denies diff/git output flags and rg --pre without treating them as success", () => {
+		// Production repros: no '>' so checkPath never runs; reserved paths and
+		// child launch must still fail closed at inspectBashCommand.
+		for (const command of [
+			"diff --output=.git/config /dev/null README.md",
+			"git diff --no-index --output=.pi/meta-loop/runs/owner.lock.json /dev/null README.md",
+			"git diff --output=src/pwned.ts HEAD",
+			"GIT_EXTERNAL_DIFF=evil git diff HEAD",
+			"git -c core.pager=evil log -1",
+			"rg --pre=sh . src/payload.sh",
+			"rg --pre sh . src/payload.sh",
+		]) {
+			const result = inspect(command);
+			assert.equal(result.ok, false, command);
+			assert.match(result.reason ?? "", /allowlist|blocked git/i, command);
+		}
 	});
 
 	it("rejects an empty native allowed_scope", () => {
