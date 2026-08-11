@@ -10,6 +10,11 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { EscalationSettings } from "./escalation.ts";
 import { defaultEscalation } from "./escalation.ts";
+import {
+	DEFAULT_EVIDENCE_IGNORE_DIRS,
+	DEFAULT_FILESYSTEM_SNAPSHOT_LIMITS,
+} from "./fs-snapshot.ts";
+import type { VerifyMode } from "./types.ts";
 
 export interface RoleConfig {
 	model?: string;
@@ -35,6 +40,8 @@ export interface ExecutorSettings {
 	sfhEffort?: string;
 	sfhToolEfforts?: Record<string, string>;
 	sfhIntegrateEffort?: string;
+	/** Explicit tool for the sfh integrate step; otherwise inferred from the model id. */
+	sfhIntegrateTool?: string;
 	sfhAccess?: string;
 	sfhToolAccess?: Record<string, string>;
 	sfhIntegrateAccess?: string;
@@ -51,6 +58,28 @@ export interface ExecutorSettings {
 	verifyProfile?: string;
 	/** Wall-clock budget for the full verify sequence (seconds). */
 	verifyTimeoutSec?: number;
+	/**
+	 * `per-ticket` (default) verifies after every native ticket. `final` verifies
+	 * once after the execute loop and promotes tickets that claimed done, which
+	 * suits plans whose intermediate tickets cannot leave the tree green.
+	 */
+	verifyMode?: VerifyMode;
+}
+
+/**
+ * Bounds on the post-hoc filesystem evidence sweep.
+ *
+ * Project layers may only *widen* coverage (drop ignores, scan deeper, allow
+ * more entries) — the inverse of every other setting here, because narrower
+ * evidence means weaker detection.
+ */
+export interface EvidenceSettings {
+	/** Directory names recorded but not descended into. */
+	ignoreDirNames: string[];
+	/** Depth below cwd's parent. 0 records direct entries without descending. */
+	parentMaxDepth: number;
+	maxEntries: number;
+	timeoutMs: number;
 }
 
 /** Access ceilings captured after base (repo/user/global) layers. Project/ticket cannot raise above these. */
@@ -70,16 +99,29 @@ export interface MetaLoopConfig {
 	supervisor: SupervisorSettings;
 	executor: ExecutorSettings;
 	escalation: EscalationSettings;
+	evidence: EvidenceSettings;
 	limits: {
 		maxTasks: number;
-		concurrency: number;
 		perTaskOutputCap: number;
+		/**
+		 * Upper bound on Supervisor audits per run. Bounds the model spend when a
+		 * single dependency failure blocks many tickets at once.
+		 */
+		maxSupervisions: number;
+		/**
+		 * Optional harness-level ceiling on ticket `allowed_scope`. When set, every
+		 * ticket path must also match one of these rules, so a plan cannot widen the
+		 * write surface beyond what the user approved.
+		 */
+		scopeCeiling?: string[];
 	};
 	/**
 	 * Base-layer (user/global) sfh access ceilings.
 	 * Applied as min() over tool map / branch.access / integrate resolution so project or ticket cannot escalate.
 	 */
 	sfhAccessCeiling?: SfhAccessCeiling;
+	/** User/base opt-in allowing project config to choose role models. Default false. */
+	allowProjectModelOverride: boolean;
 }
 
 export const CONFIG_VERSION = 1;
@@ -140,6 +182,30 @@ function verifyCommandKey(argv: string[]): string {
 	return JSON.stringify(argv);
 }
 
+function normalizeVerifyMode(raw: unknown): VerifyMode | undefined {
+	return raw === "final" || raw === "per-ticket" ? raw : undefined;
+}
+
+/**
+ * Settings that resolve to `write`/`full` sfh access. That access is refused at
+ * plan and execute time (no OS sandbox can enforce scope), so surfacing it up
+ * front turns a late, unactionable ticket failure into one clear warning.
+ *
+ * The access-resolution ceilings stay intact rather than being clamped here, so
+ * the privilege model is still exercised and ready if a sandbox lands.
+ */
+export function unsupportedSfhAccessSettings(config: MetaLoopConfig): string[] {
+	const ex = config.executor;
+	const mutating = (value: string | undefined) => value === "write" || value === "full";
+	const found: string[] = [];
+	if (mutating(ex.sfhAccess)) found.push(`executor.sfhAccess=${ex.sfhAccess}`);
+	if (mutating(ex.sfhIntegrateAccess)) found.push(`executor.sfhIntegrateAccess=${ex.sfhIntegrateAccess}`);
+	for (const [tool, value] of Object.entries(ex.sfhToolAccess ?? {})) {
+		if (mutating(value)) found.push(`executor.sfhToolAccess.${tool}=${value}`);
+	}
+	return found;
+}
+
 function normalizeVerifyProfiles(raw: unknown): Record<string, string[][]> | undefined {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
 	const profiles: Record<string, string[][]> = {};
@@ -163,6 +229,7 @@ function narrowVerifyCommands(
 
 const defaultConfig: MetaLoopConfig = {
 	enabled: true,
+	allowProjectModelOverride: false,
 	roles: {
 		orchestrator: { model: "", tools: [...READ_TOOLS] },
 		supervisor: { model: "", tools: [...READ_TOOLS] },
@@ -185,6 +252,7 @@ const defaultConfig: MetaLoopConfig = {
 		sfhEffort: "",
 		sfhToolEfforts: {},
 		sfhIntegrateEffort: "",
+		sfhIntegrateTool: "",
 		sfhAccess: "read",
 		sfhToolAccess: {},
 		sfhIntegrateAccess: "read",
@@ -193,12 +261,20 @@ const defaultConfig: MetaLoopConfig = {
 		verifyProfiles: {},
 		verifyProfile: undefined,
 		verifyTimeoutSec: DEFAULT_VERIFY_TIMEOUT_SEC,
+		verifyMode: "per-ticket",
 	},
 	escalation: { ...defaultEscalation },
+	evidence: {
+		ignoreDirNames: [...DEFAULT_EVIDENCE_IGNORE_DIRS],
+		parentMaxDepth: DEFAULT_FILESYSTEM_SNAPSHOT_LIMITS.parentMaxDepth,
+		maxEntries: DEFAULT_FILESYSTEM_SNAPSHOT_LIMITS.maxEntries,
+		timeoutMs: DEFAULT_FILESYSTEM_SNAPSHOT_LIMITS.timeoutMs,
+	},
 	limits: {
 		maxTasks: 8,
-		concurrency: 1,
 		perTaskOutputCap: 51200,
+		maxSupervisions: 12,
+		scopeCeiling: undefined,
 	},
 };
 
@@ -208,7 +284,19 @@ function repoRoot(): string {
 	return path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 }
 
-function readJsonIfExists(p: string): Record<string, unknown> | null {
+/**
+ * Config layers that could not be read, in load order. A broken layer disables
+ * meta-loop, and the only prior signal was a `console.error` the TUI never
+ * shows — so the reason is recorded here for `/ml-doctor` and the run start.
+ */
+export interface ConfigProblem {
+	file: string;
+	message: string;
+}
+
+const configProblems = new Map<string, ConfigProblem[]>();
+
+function readJsonIfExists(p: string, problems?: ConfigProblem[]): Record<string, unknown> | null {
 	try {
 		if (!fs.existsSync(p)) return null;
 		const value = JSON.parse(fs.readFileSync(p, "utf-8")) as unknown;
@@ -221,10 +309,17 @@ function readJsonIfExists(p: string): Record<string, unknown> | null {
 		}
 		return parsed;
 	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
 		console.error(`[pi-meta-loop] failed to read config ${p}:`, err);
+		problems?.push({ file: p, message });
 		// A present but unreadable layer must never silently broaden capabilities.
 		return { enabled: false };
 	}
+}
+
+/** Why meta-loop is disabled, when a config layer failed to load for this cwd. */
+export function getConfigProblems(cwd: string): ConfigProblem[] {
+	return configProblems.get(path.resolve(cwd)) ?? [];
 }
 
 function intersectTools(ceiling: string[] | undefined, request: string[] | undefined): string[] | undefined {
@@ -263,14 +358,24 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 		if (kind === "project") merged.enabled = merged.enabled && layer.enabled;
 		else merged.enabled = layer.enabled;
 	}
+	if (typeof layer.allowProjectModelOverride === "boolean" && kind !== "project") {
+		// Only user/base layers may hand this decision to project config.
+		merged.allowProjectModelOverride = layer.allowProjectModelOverride;
+	}
 	if (layer.roles && typeof layer.roles === "object") {
 		for (const role of ["orchestrator", "supervisor", "worker"] as const) {
 			const r = (layer.roles as any)[role];
 			if (!r || typeof r !== "object") continue;
 			const cur = merged.roles[role];
 			if (kind === "project") {
+				// Which model supervises is a trust decision, not a project preference:
+				// a repository could otherwise point the Supervisor at a weak model and
+				// hollow out supervision, or at a provider that sees the conversation
+				// digest. Opt in explicitly per user config to allow it.
+				const projectModel =
+					merged.allowProjectModelOverride && typeof r.model === "string" ? r.model : cur.model;
 				merged.roles[role] = {
-					model: typeof r.model === "string" ? r.model : cur.model,
+					model: projectModel,
 					tools: intersectTools(cur.tools, Array.isArray(r.tools) ? r.tools.map(String) : undefined) ?? cur.tools,
 				};
 			} else {
@@ -284,17 +389,42 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 	}
 	if (layer.limits && typeof layer.limits === "object") {
 		const L = layer.limits as any;
+		const requestedCeiling = Array.isArray(L.scopeCeiling) ? L.scopeCeiling.map(String) : undefined;
 		const requested = {
 			maxTasks: clampInt(L.maxTasks ?? merged.limits.maxTasks, 1, 64),
-			concurrency: clampInt(L.concurrency ?? merged.limits.concurrency, 1, 8),
 			perTaskOutputCap: clampInt(L.perTaskOutputCap ?? merged.limits.perTaskOutputCap, 1000, 5_000_000),
+			maxSupervisions: clampInt(L.maxSupervisions ?? merged.limits.maxSupervisions, 1, 200),
 		};
 		merged.limits =
 			kind === "project"
 				? {
 						maxTasks: Math.min(merged.limits.maxTasks, requested.maxTasks),
-						concurrency: Math.min(merged.limits.concurrency, requested.concurrency),
 						perTaskOutputCap: Math.min(merged.limits.perTaskOutputCap, requested.perTaskOutputCap),
+						maxSupervisions: Math.min(merged.limits.maxSupervisions, requested.maxSupervisions),
+						// A project may tighten the write surface further, never widen it.
+						scopeCeiling: intersectAllowList(merged.limits.scopeCeiling, requestedCeiling),
+				  }
+				: { ...requested, scopeCeiling: requestedCeiling ?? merged.limits.scopeCeiling };
+	}
+	if (layer.evidence && typeof layer.evidence === "object") {
+		const E = layer.evidence as any;
+		const requestedIgnores = Array.isArray(E.ignoreDirNames) ? E.ignoreDirNames.map(String) : undefined;
+		const requested = {
+			ignoreDirNames: requestedIgnores ?? merged.evidence.ignoreDirNames,
+			parentMaxDepth: clampInt(E.parentMaxDepth ?? merged.evidence.parentMaxDepth, 0, 8),
+			maxEntries: clampInt(E.maxEntries ?? merged.evidence.maxEntries, 1_000, 5_000_000),
+			timeoutMs: clampInt(E.timeoutMs ?? merged.evidence.timeoutMs, 1_000, 600_000),
+		};
+		merged.evidence =
+			kind === "project"
+				? {
+						// Inverted monotonicity: a project may only widen evidence coverage.
+						ignoreDirNames: requestedIgnores
+							? merged.evidence.ignoreDirNames.filter((d) => requestedIgnores.includes(d))
+							: merged.evidence.ignoreDirNames,
+						parentMaxDepth: Math.max(merged.evidence.parentMaxDepth, requested.parentMaxDepth),
+						maxEntries: Math.max(merged.evidence.maxEntries, requested.maxEntries),
+						timeoutMs: Math.max(merged.evidence.timeoutMs, requested.timeoutMs),
 				  }
 				: requested;
 	}
@@ -364,6 +494,7 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 				sfhIntegrateModel: typeof ex.sfhIntegrateModel === "string" ? ex.sfhIntegrateModel : cur.sfhIntegrateModel,
 				sfhEffort: typeof ex.sfhEffort === "string" ? ex.sfhEffort : cur.sfhEffort,
 				sfhIntegrateEffort: typeof ex.sfhIntegrateEffort === "string" ? ex.sfhIntegrateEffort : cur.sfhIntegrateEffort,
+				sfhIntegrateTool: typeof ex.sfhIntegrateTool === "string" ? ex.sfhIntegrateTool : cur.sfhIntegrateTool,
 				sfhAccess:
 					ex.sfhAccess === undefined ? cur.sfhAccess : minAccess(cur.sfhAccess, ex.sfhAccess),
 				sfhIntegrateAccess:
@@ -387,6 +518,8 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 					cur.verifyTimeoutSec ?? DEFAULT_VERIFY_TIMEOUT_SEC,
 					clampInt(ex.verifyTimeoutSec ?? cur.verifyTimeoutSec ?? DEFAULT_VERIFY_TIMEOUT_SEC, 5, 86_400),
 				),
+				// Scheduling preference, not a capability: the gate strength is identical.
+				verifyMode: normalizeVerifyMode(ex.verifyMode) ?? cur.verifyMode,
 			};
 		} else {
 			const profiles = {
@@ -413,6 +546,7 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 					ex.verifyTimeoutSec === undefined
 						? cur.verifyTimeoutSec
 						: clampInt(ex.verifyTimeoutSec, 5, 86_400),
+				verifyMode: normalizeVerifyMode(ex.verifyMode) ?? cur.verifyMode,
 			};
 		}
 	}
@@ -457,6 +591,7 @@ export function resolveMaxTasksCeiling(configured: number, requested?: number): 
 function cloneDefault(): MetaLoopConfig {
 	return {
 		enabled: defaultConfig.enabled,
+		allowProjectModelOverride: defaultConfig.allowProjectModelOverride,
 		roles: {
 			orchestrator: { ...defaultConfig.roles.orchestrator, tools: [...(defaultConfig.roles.orchestrator.tools ?? [])] },
 			supervisor: { ...defaultConfig.roles.supervisor, tools: [...(defaultConfig.roles.supervisor.tools ?? [])] },
@@ -484,9 +619,19 @@ function cloneDefault(): MetaLoopConfig {
 				]),
 			),
 			verifyProfile: defaultConfig.executor.verifyProfile,
+			verifyMode: defaultConfig.executor.verifyMode,
 		},
 		escalation: { ...defaultConfig.escalation },
-		limits: { ...defaultConfig.limits },
+		evidence: {
+			...defaultConfig.evidence,
+			ignoreDirNames: [...defaultConfig.evidence.ignoreDirNames],
+		},
+		limits: {
+			...defaultConfig.limits,
+			scopeCeiling: defaultConfig.limits.scopeCeiling
+				? [...defaultConfig.limits.scopeCeiling]
+				: undefined,
+		},
 	};
 }
 
@@ -526,19 +671,54 @@ export function buildConfigFromLayers(
 	return merged;
 }
 
-export function loadConfig(cwd: string): MetaLoopConfig {
+interface ConfigCacheEntry {
+	config: MetaLoopConfig;
+	problems: ConfigProblem[];
+	at: number;
+}
+const configCache = new Map<string, ConfigCacheEntry>();
+/**
+ * Config is re-read on every tool call by the escalation hook. Layers change at
+ * human speed, so a short TTL removes that per-call disk work while still
+ * picking up edits within a couple of seconds.
+ */
+const CONFIG_CACHE_TTL_MS = 2_000;
+
+/** Drop cached layers (tests, and any path that rewrites config on disk). */
+export function invalidateConfigCache(): void {
+	configCache.clear();
+}
+
+export function loadConfig(cwd: string, opts?: { cache?: boolean }): MetaLoopConfig {
+	const key = path.resolve(cwd);
+	if (opts?.cache) {
+		const hit = configCache.get(key);
+		if (hit && Date.now() - hit.at < CONFIG_CACHE_TTL_MS) {
+			configProblems.set(key, hit.problems);
+			return hit.config;
+		}
+	}
+	const config = loadConfigUncached(cwd);
+	if (opts?.cache) {
+		configCache.set(key, { config, problems: getConfigProblems(cwd), at: Date.now() });
+	}
+	return config;
+}
+
+function loadConfigUncached(cwd: string): MetaLoopConfig {
 	const userDir = path.join(getAgentDir(), "meta-loop");
 	const projectDir = path.join(cwd, CONFIG_DIR_NAME, "meta-loop");
 	const merged = cloneDefault();
+	const problems: ConfigProblem[] = [];
 
 	// base layers (may expand from defaults)
-	applyLayer(merged, readJsonIfExists(path.join(repoRoot(), "config", "meta-loop.json")), "base");
-	applyLayer(merged, readJsonIfExists(path.join(userDir, "config.json")), "base");
+	applyLayer(merged, readJsonIfExists(path.join(repoRoot(), "config", "meta-loop.json"), problems), "base");
+	applyLayer(merged, readJsonIfExists(path.join(userDir, "config.json"), problems), "base");
 	// Freeze user/global access ceilings before project layers (project may only narrow).
 	captureSfhAccessCeiling(merged);
 	// legacy project first, then folder form (folder wins)
-	const legacy = readJsonIfExists(path.join(cwd, CONFIG_DIR_NAME, "meta-loop.json"));
-	const folder = readJsonIfExists(path.join(projectDir, "config.json"));
+	const legacy = readJsonIfExists(path.join(cwd, CONFIG_DIR_NAME, "meta-loop.json"), problems);
+	const folder = readJsonIfExists(path.join(projectDir, "config.json"), problems);
 	if (legacy && folder) {
 		console.error("[pi-meta-loop] both .pi/meta-loop.json and .pi/meta-loop/config.json exist; folder form wins");
 	}
@@ -547,6 +727,7 @@ export function loadConfig(cwd: string): MetaLoopConfig {
 
 	// Scoped native workers never receive bash, regardless of alias/args/config requests.
 	enforceNativeWorkerToolPolicy(merged);
+	configProblems.set(path.resolve(cwd), problems);
 	return merged;
 }
 

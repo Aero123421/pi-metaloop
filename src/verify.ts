@@ -4,7 +4,7 @@
  * Runs configured argv lists with shell:false after a native Worker finishes.
  * Independent of model claims — required before ticket status may become "done".
  */
-import type { VerifyEvidence } from "./types.ts";
+import type { VerifyBaseline, VerifyEvidence } from "./types.ts";
 import { spawnManagedProcess } from "./spawn.ts";
 import { DEFAULT_VERIFY_TIMEOUT_SEC } from "./config.ts";
 
@@ -12,6 +12,33 @@ const OUTPUT_CAP = 8_000;
 
 export function unsetVerifyEvidence(reason = "controller trusted verify not configured"): VerifyEvidence {
 	return { status: "unset", reason, commands: [] };
+}
+
+/** Stable identity of a verify failure: the argv that failed. */
+export function verifySignature(verify: VerifyEvidence | undefined): string | undefined {
+	return verify?.failedCommand ? JSON.stringify(verify.failedCommand) : undefined;
+}
+
+/** Capture the run-start baseline so pre-existing red is not blamed on a ticket. */
+export function toVerifyBaseline(verify: VerifyEvidence): VerifyBaseline {
+	return { status: verify.status, signature: verifySignature(verify) };
+}
+
+/**
+ * Whether a ticket's verify failure was already failing before the run started.
+ * Matching on the failing argv is deliberately coarse: a ticket can add a new
+ * failure inside an already-red command and still be treated as pre-existing.
+ * That only softens `failed` to `partial` — it never authorizes `done` — so the
+ * completion gate is unchanged while pre-existing red stops cascading stops.
+ */
+export function isPreExistingFailure(
+	verify: VerifyEvidence | undefined,
+	baseline: VerifyBaseline | undefined,
+): boolean {
+	if (!verify || verify.status !== "failed") return false;
+	if (!baseline || baseline.status !== "failed") return false;
+	const signature = verifySignature(verify);
+	return signature !== undefined && signature === baseline.signature;
 }
 
 /**
@@ -110,6 +137,7 @@ export async function runControllerVerify(opts: {
 			return {
 				status: "timeout",
 				commands,
+				failedCommand: argv,
 				exitCode: result.exitCode,
 				timedOut: true,
 				output: outputs.join("\n").slice(-OUTPUT_CAP),
@@ -120,6 +148,7 @@ export async function runControllerVerify(opts: {
 			return {
 				status: "failed",
 				commands,
+				failedCommand: argv,
 				exitCode: result.exitCode,
 				output: outputs.join("\n").slice(-OUTPUT_CAP),
 				reason: `controller verify failed (exit ${result.exitCode}): ${argv.join(" ")}`,

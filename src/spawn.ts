@@ -50,6 +50,12 @@ function agentsDir(): string {
 	return path.join(here, "..", "agents");
 }
 
+/**
+ * Load a role definition. A missing or unreadable file is fatal on purpose:
+ * continuing with an empty system prompt would launch a plain coding agent —
+ * with write/edit tools and none of the role's constraints — under this role's
+ * name. Everywhere else this harness fails closed, and so must this.
+ */
 export function loadRole(name: RoleName, roleConfig: RoleConfig): LoadedRole {
 	const filePath = path.join(agentsDir(), `${name}.md`);
 	let systemPrompt = "";
@@ -64,8 +70,16 @@ export function loadRole(name: RoleName, roleConfig: RoleConfig): LoadedRole {
 			?.split(",")
 			.map((t) => t.trim())
 			.filter(Boolean);
-	} catch {
-		/* missing agent file */
+	} catch (err) {
+		throw new Error(
+			`pi-meta-loop: cannot read role definition ${filePath} (${err instanceof Error ? err.message : String(err)}). ` +
+				"Refusing to run a role without its instructions; reinstall the extension.",
+		);
+	}
+	if (!systemPrompt.trim()) {
+		throw new Error(
+			`pi-meta-loop: role definition ${filePath} has an empty body. Refusing to run a role without its instructions.`,
+		);
 	}
 	const configuredTools = roleConfig.tools ?? fmTools;
 	return {

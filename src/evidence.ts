@@ -179,6 +179,26 @@ export function collectGitChangedFiles(cwd: string): string[] {
 	}
 }
 
+/**
+ * Rules in `allowed_scope` that a harness-level ceiling does not cover.
+ *
+ * The check is syntactic containment: each requested rule is matched, as if it
+ * were a path, against the ceiling rules. That proves containment for the
+ * prefix-style ceilings people actually write (`src/**`, `packages/api/**`) and
+ * conservatively rejects anything it cannot prove — including the broad forms
+ * this is meant to stop, like `**` or a bare `*.ts` that would reach every
+ * matching file in the project.
+ */
+export function scopeRulesOutsideCeiling(rules: string[], ceiling: string[] | undefined): string[] {
+	if (!ceiling?.length) return [];
+	const norm = (r: string) => (process.platform === "win32" ? r.toLowerCase() : r);
+	return rules.filter((rule) => {
+		const target = norm(toPosix(rule.trim()).replace(/^\.\//, "").replace(/\/+$/, ""));
+		if (!target) return true;
+		return !ceiling.some((allowed) => matchRule(target, target, norm(allowed)));
+	});
+}
+
 export function findScopeViolations(
 	changedFiles: string[],
 	cwd: string,
@@ -290,6 +310,14 @@ function parsePorcelainV2Path(record: string): string | null {
 	return null;
 }
 
+/**
+ * Content-hash budget for a single dirty/untracked worktree file. Beyond this,
+ * fall back to stat metadata: `git status --untracked-files=all` can list large
+ * un-ignored artifacts (dumps, archives, model weights), and reading those whole
+ * — twice per ticket — is not worth the extra precision.
+ */
+export const WORKTREE_HASH_MAX_BYTES = 8 * 1_048_576;
+
 function hashWorktreeFile(cwd: string, relPosix: string): string {
 	const abs = path.join(cwd, relPosix);
 	try {
@@ -299,6 +327,9 @@ function hashWorktreeFile(cwd: string, relPosix: string): string {
 		const st = fs.statSync(abs);
 		if (st.isDirectory()) {
 			return sha256Hex(`__dir__:${relPosix}`);
+		}
+		if (st.size > WORKTREE_HASH_MAX_BYTES) {
+			return sha256Hex(`__large__:${relPosix}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`);
 		}
 		return sha256Hex(fs.readFileSync(abs));
 	} catch (e) {

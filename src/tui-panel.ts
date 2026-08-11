@@ -1,5 +1,5 @@
 /**
- * Colored / structured TUI panel for meta-loop + sfh (0.2.3).
+ * Colored / structured TUI panel for meta-loop + sfh.
  */
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { runElapsed, ticketCounts, type PersistedRun } from "./board-store.ts";
