@@ -9,8 +9,11 @@ import * as path from "node:path";
 import type { TaskBoard, Verdict } from "./types.ts";
 
 export type RunStatus = "running" | "done" | "error" | "stopped" | "incomplete";
+export const BOARD_SCHEMA_VERSION = 1;
 
 export interface PersistedRun {
+	/** Missing means a legacy 0.2.x board; future unknown versions are rejected. */
+	board_schema_version?: number;
 	runId: string;
 	cwd: string;
 	goal: string;
@@ -389,7 +392,7 @@ export function writeRun(cwd: string, run: PersistedRun): void {
 	}
 	const dir = ensureRunDir(cwd, run.runId);
 	const root = ensureMetaLoopRunsRoot(cwd);
-	const payload = { ...run, updatedAt: new Date().toISOString() };
+	const payload = { ...run, board_schema_version: BOARD_SCHEMA_VERSION, updatedAt: new Date().toISOString() };
 	const boardPath = path.join(dir, "board.json");
 	atomicWriteFile(boardPath, JSON.stringify(payload, null, 2));
 	assertWrittenPathInsideCwd(cwd, boardPath);
@@ -414,6 +417,7 @@ export function readRun(cwd: string, runId: string): PersistedRun | null {
 		const raw = fs.readFileSync(file, "utf-8");
 		const parsed = JSON.parse(raw) as PersistedRun;
 		if (!parsed || typeof parsed !== "object") return null;
+		if (parsed.board_schema_version !== undefined && parsed.board_schema_version !== BOARD_SCHEMA_VERSION) return null;
 		return parsed;
 	} catch {
 		return null;

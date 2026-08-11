@@ -8,6 +8,7 @@ import { describe, it } from "node:test";
 import {
 	acquireOwnerLock,
 	atomicWriteFile,
+	BOARD_SCHEMA_VERSION,
 	createRunId,
 	isValidRunId,
 	listRuns,
@@ -90,6 +91,7 @@ describe("board-store", () => {
 		const latest = readLatestRun(cwd);
 		assert.ok(latest);
 		assert.equal(latest!.runId, runId);
+		assert.equal(latest!.board_schema_version, BOARD_SCHEMA_VERSION);
 		assert.equal(latest!.board.tickets.length, 2);
 		assert.equal(readRun(cwd, runId)?.label, "executing: t2");
 		assert.equal(listRuns(cwd, 5).length, 1);

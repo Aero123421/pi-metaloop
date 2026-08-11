@@ -27,7 +27,7 @@ import {
 	type OwnerLockHolder,
 	type PersistedRun,
 } from "./board-store.ts";
-import { loadConfig, resolveMaxTasksCeiling } from "./config.ts";
+import { getVerifyDiagnostics, loadConfig, resolveMaxTasksCeiling } from "./config.ts";
 import {
 	createEscalationStats,
 	escalationMessage,
@@ -37,6 +37,7 @@ import {
 } from "./escalation.ts";
 import { decideAbortWait, waitForSettlement } from "./orchestration-lifecycle.ts";
 import { runSupervisedTask } from "./runtime.ts";
+import { runSfhPreflight } from "./sfh-exec.ts";
 import {
 	activeRuns,
 	formatElapsed as sfhElapsed,
@@ -1018,6 +1019,36 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(
 				verdicts.map((v, i) => `#${i + 1} ${v.verdict}${v.observations[0] ? ` — ${v.observations[0]}` : ""}`).join("\n"),
 				"info",
+			);
+		},
+	});
+
+	pi.registerCommand("ml-doctor", {
+		description: "Show effective verify gate and SFH machine-contract diagnostics",
+			handler: async (_args, ctx) => {
+			const cfg = loadConfig(ctx.cwd);
+			const verify = getVerifyDiagnostics(ctx.cwd, cfg);
+			const sfh = runSfhPreflight(cfg.executor.sfhBinary || "sfh", undefined, ctx.cwd);
+			const commands = verify.commands.length
+				? verify.commands.map((argv) => `  - ${JSON.stringify(argv)}`)
+				: ["  - (none; native done will remain partial)"];
+			ctx.ui.notify(
+				[
+					`meta-loop: ${cfg.enabled ? "ENABLED" : "DISABLED (check config errors)"}`,
+					`native done: ${verify.donePossible ? "READY" : "BLOCKED"}`,
+					`verify profile: ${verify.profile || "(direct/none)"}`,
+					`allowed by: ${verify.allowedBy}`,
+					`project narrowing: ${verify.narrowedBy.join(", ") || "none"}`,
+					`timeout: ${verify.timeoutSec}s`,
+					verify.problem ? `verify action: ${verify.problem}` : "",
+					"verify argv:",
+					...commands,
+					"",
+					`sfh machine schema: ${sfh.schemaVersion === 1 ? "v1 compatible" : "UNSUPPORTED"}`,
+					`sfh version: ${sfh.sfhVersion || "unknown"}`,
+					`sfh preflight: ${sfh.ok ? "ready" : [sfh.errorCode, sfh.errorMessage].filter(Boolean).join(": ") || "failed"}`,
+				].join("\n"),
+				cfg.enabled && verify.donePossible && sfh.schemaVersion === 1 ? "info" : "warning",
 			);
 		},
 	});

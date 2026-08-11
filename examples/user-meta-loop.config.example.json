@@ -1,4 +1,5 @@
 {
+	"config_version": 1,
 	"_comment": "ユーザー全体設定の例。この内容を ~/.pi/agent/meta-loop/config.json に置く。",
 	"roles": {
 		"orchestrator": {
@@ -23,7 +24,12 @@
 			"opencode": "",
 			"codex": "",
 			"claude": ""
-		}
+		},
+		"verifyProfiles": {
+			"node": [["npm", "test"], ["npm", "run", "typecheck"]],
+			"rust": [["cargo", "test", "--locked"]]
+		},
+		"verifyTimeoutSec": 600
 	},
 	"supervisor": {
 		"auto": true,

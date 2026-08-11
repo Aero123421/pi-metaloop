@@ -1,4 +1,5 @@
 {
+	"config_version": 1,
 	"_comment": "プロジェクト設定の例。この内容を <プロジェクト>/.pi/meta-loop/config.json に置く。",
 	"roles": {
 		"worker": {
@@ -7,6 +8,7 @@
 	},
 	"executor": {
 		"maxParallel": 3,
+		"verifyProfile": "node",
 		"sfhToolModels": {
 			"pi": ""
 		}

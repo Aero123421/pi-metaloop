@@ -1,18 +1,28 @@
 {
 	"name": "pi-meta-loop",
-	"version": "0.2.6-alpha",
-	"description": "Experimental adaptive supervised orchestration for pi (alpha). Short tasks stay light; long tasks get Orchestrator + Supervisor + Workers/sfh with fail-closed audit and evidence-based completion.",
+	"version": "0.3.0-rc.1",
+	"description": "Adaptive supervised orchestration for pi. Short tasks stay light; long tasks get Orchestrator + Supervisor + Workers/sfh with fail-closed audit and evidence-based completion.",
 	"license": "MIT",
 	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Aero123421/pi-metaloop.git"
+	},
+	"homepage": "https://github.com/Aero123421/pi-metaloop#readme",
+	"bugs": "https://github.com/Aero123421/pi-metaloop/issues",
+	"files": ["agents", "config", "skills", "src", "README.md", "README.ja.md", "DESIGN.md", "CHANGELOG.md", "LICENSE", "SECURITY.md", "SUPPORT.md"],
+	"publishConfig": {
+		"access": "public"
+	},
 	"keywords": ["pi-package", "orchestration", "multi-agent", "metacognition", "supervision"],
 	"pi": {
 		"extensions": ["./src/index.ts"],
 		"skills": ["./skills"]
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*",
-		"typebox": "*"
+		"@earendil-works/pi-ai": "^0.83.0",
+		"@earendil-works/pi-coding-agent": "^0.83.0",
+		"typebox": "^1.3.10"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-ai": "^0.83.0",
@@ -23,9 +33,11 @@
 	},
 	"scripts": {
 		"typecheck": "tsc --noEmit",
-		"test": "node --experimental-strip-types --test test/**/*.test.ts"
+		"test": "node --experimental-strip-types --test --test-concurrency=1 test/**/*.test.ts",
+		"release:check": "node scripts/release-check.mjs",
+		"package:smoke": "node scripts/package-smoke.mjs"
 	},
 	"engines": {
-		"node": ">=20"
+		"node": ">=22.19.0"
 	}
 }

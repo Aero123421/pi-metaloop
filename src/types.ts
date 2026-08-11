@@ -66,6 +66,13 @@ export interface ExecutionEvidence {
 	actualChangedFiles: string[];
 	scopeViolations: string[];
 	claimedStatus?: string;
+	sfh?: {
+		schemaVersion: number;
+		version?: string;
+		runId?: string;
+		runDir?: string;
+		errorCode?: string;
+	};
 	/** Present on native implementation tickets after controller verify gate. */
 	verify?: VerifyEvidence;
 }

@@ -1,12 +1,12 @@
 # pi-meta-loop
 
-**Status: 0.2.0-alpha (experimental).** Adaptive supervised orchestration for [pi](https://github.com/earendil-works/pi).
+**Status: release candidate; see `package.json` for the exact version.** Adaptive supervised orchestration for [pi](https://github.com/earendil-works/pi).
 
 Short tasks stay lightweight. Long tasks can use a supervised layer (Orchestrator + Supervisor + Workers / sfh) with **fail-closed initial audit**, **evidence-based completion**, and **capability separation** (not prompt-only).
 
 [日本語 README](./README.ja.md)
 
-> This is not a finished “hard multi-agent OS”. Treat strong guarantees in older notes as goals; this alpha implements the critical path fixes (sfh success path, supervisor payload, fail-closed audit, scope+git evidence, no bash on orch/sup by default).
+> This is not a “hard multi-agent OS”. The release candidate implements the documented critical path; stronger guarantees in older notes remain goals.
 
 ## The idea
 
@@ -30,6 +30,12 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Aero123421/SimpleFlowHa
 ```
 
 Without sfh, group tickets are blocked with install instructions; normal (native) tickets still work.
+
+| Dependency | Supported contract |
+|---|---|
+| Node.js | `>=22.19.0` |
+| pi / pi-ai | `^0.83.0` |
+| SFH | `>=1.4.0`, machine schema `1` (`sfh run/preflight --json`) |
 
 ## How it works
 
@@ -99,19 +105,19 @@ As a pi package:
 ```bash
 pi install git:github.com/Aero123421/pi-metaloop
 # or a local path
-pi install /path/to/pi-metaLoop
+pi install /path/to/pi-meta-loop
 ```
 
 Or add to `~/.pi/agent/settings.json`:
 
 ```json
-{ "extensions": ["/path/to/pi-metaLoop"] }
+{ "extensions": ["/path/to/pi-meta-loop"] }
 ```
 
 Quick test without installing:
 
 ```bash
-pi -e /path/to/pi-metaLoop/src/index.ts
+pi -e /path/to/pi-meta-loop/src/index.ts
 ```
 
 ### First-time project setup (skill)
@@ -122,7 +128,7 @@ Explicitly invoke:
 /skill:meta-loop-setup
 ```
 
-Interactive wizard: user vs project scope, Orchestrator/Supervisor/Worker models, sfh allowed tools + per-tool model/effort/access, standards. Writes `~/.pi/agent/meta-loop/` and/or `.pi/meta-loop/`.
+Interactive wizard: scope, role models, sfh settings, an approved verify profile, and standards. Writes `~/.pi/agent/meta-loop/` and/or `.pi/meta-loop/`.
 
 ## Configuration
 
@@ -187,12 +193,28 @@ Integrate step uses `executor.sfhIntegrateModel` → `sfhModel` → `roles.worke
 
 See `examples/user-meta-loop.config.example.json` and `examples/project-meta-loop.config.example.json`.
 
+### Trusted verify profiles
+
+Native Worker `done` requires controller-side verify. Define approved argv in user config; project config may only select an existing profile.
+
+```jsonc
+// user: ~/.pi/agent/meta-loop/config.json
+{ "executor": { "verifyProfiles": { "node": [["npm", "test"], ["npm", "run", "typecheck"]] } } }
+
+// project: .pi/meta-loop/config.json
+{ "executor": { "verifyProfile": "node", "verifyTimeoutSec": 600 } }
+```
+
+Projects cannot introduce profiles or argv. Unset, failed, or timed-out verify safely leaves a ticket `partial`. `/ml-doctor` shows the effective profile, argv, timeout, and provenance.
+
 Other knobs:
 
 - `enabled` — kill switch
 - `roles.<role>.tools` — tools available to the role
 - `supervisor.*` — automatic supervision hooks
 - `executor.*` — sfh delegation and models
+- `executor.sfhAllowedTools` — omitted is unrestricted, `[]` is deny-all, non-empty is an allowlist
+- `executor.verifyProfiles` / `verifyProfile` — user-approved argv and project selection
 - `escalation.enabled` — soft long-task nudge (default true)
 - `escalation.toolCallThreshold` — default 20
 - `escalation.distinctPathThreshold` — default 8
@@ -218,7 +240,7 @@ The Orchestrator may cut research/exploration/comparison work into a single **gr
 }
 ```
 
-The runtime generates a `flow.yaml` (saved under `.pi/meta-loop/flows/`) and runs `sfh run` in the foreground with `PI_META_LOOP_DEPTH=1` in the flow env. The integrated report (sfh stdout) plus cost/elapsed metadata is collected into the board. The TUI monitor shows live progress while the flow runs.
+The runtime generates a `flow.yaml`, checks it with `sfh preflight --json`, then runs `sfh run --json` with `PI_META_LOOP_DEPTH=1`. Machine schema `1`, run ID, run directory, result, and stable error code are validated directly instead of inferred from `.sfh/runs` ordering.
 
 Implementation tickets stay native (Worker pi subprocesses). Groups are for parallelizable investigation work only.
 
@@ -231,6 +253,7 @@ Implementation tickets stay native (Worker pi subprocesses). Groups are for para
 - `/verdicts` — Supervisor verdict history
 - `/ml-stop` — abort the active supervised run
 - `/ml-runs` — list on-disk runs under `.pi/meta-loop/runs/`
+- `/ml-doctor` — native-done gate and SFH machine/preflight diagnostics
 - `/sfh` — list/inspect sfh runs; `/sfh stop` stops the newest
 - While supervised: **unified colored panel** (meta-loop + sfh) below the editor + rich footer
 - `/ml-ui` — cycle panel detail `compact|normal|full` (or `show`/`hide`); shortcut `ctrl+shift+m`
@@ -244,11 +267,12 @@ Internal play-by-play stays in the widget. Chat gets plan, decisions that need y
 ## Development
 
 ```bash
-npm install
+npm ci
 npm run typecheck    # tsc --noEmit (strict)
+npm test
 ```
 
-## Security (alpha)
+## Security
 
 - Orchestrator / Supervisor / Worker default tools include **no bash**.
 - Worker tools are a **strict built-in allowlist** (`read`/`write`/`edit`/`ls`/`find`/`grep`). Native workers start with `--no-extensions -e scope-guard` so project/user extensions cannot override tools. `allowed_scope` is enforced on write/edit **and** checked after run via git + filesystem evidence. bash/custom tools from alias/args/config are stripped and bash is blocked at the tool_call gate.
@@ -274,6 +298,7 @@ npm run typecheck    # tsc --noEmit (strict)
 - [x] 0.2.5 — compact mid-review, verdictHistory, smaller plans, /tasks drill-down, user sfh full ceiling
 - [x] 0.2.6 — real globstar scope matching, including directory entries for `**/tests/**`
 - [x] 0.2.6 — systemic worker security: no bash on scoped native workers; sfh write/full fail-closed without OS sandbox
+- [x] 0.3.0-rc.1 — verify profiles, `/ml-doctor`, SFH machine envelope, release contract
 - [ ] Phase 3 — harness diagnosis (repeated failures → rules/skills/prompts weaknesses)
 - [ ] Phase 4 — evolution loop (logs + scores, external improver) — research-grade, optional
 

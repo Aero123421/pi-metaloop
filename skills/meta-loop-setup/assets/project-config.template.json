@@ -1,4 +1,5 @@
 {
+	"config_version": 1,
 	"executor": {
 		"sfhAllowedTools": ["pi", "opencode"],
 		"maxParallel": 4,
@@ -16,7 +17,8 @@
 			"pi": "",
 			"opencode": ""
 		},
-		"sfhIntegrateAccess": "read"
+		"sfhIntegrateAccess": "read",
+		"verifyProfile": "node"
 	},
 	"limits": {
 		"maxTasks": 8
