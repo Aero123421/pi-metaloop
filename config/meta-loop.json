@@ -34,7 +34,9 @@
 		"sfhIntegrateEffort": "",
 		"sfhAccess": "read",
 		"sfhToolAccess": {},
-		"sfhIntegrateAccess": "read"
+		"sfhIntegrateAccess": "read",
+		"sfhIntegrateTool": "",
+		"verifyMode": "per-ticket"
 	},
 	"escalation": {
 		"enabled": true,
@@ -43,10 +45,15 @@
 		"writeThreshold": 5,
 		"promptLengthThreshold": 400
 	},
+	"evidence": {
+		"parentMaxDepth": 0,
+		"maxEntries": 250000,
+		"timeoutMs": 30000
+	},
 	"limits": {
 		"maxTasks": 8,
-		"concurrency": 1,
-		"perTaskOutputCap": 51200
+		"perTaskOutputCap": 51200,
+		"maxSupervisions": 12
 	},
-	"notes": "Native workers use strict built-ins + --no-extensions + scope-guard. done requires a user-approved verify profile or direct verifyCommands. sfh write/full requires an OS sandbox. Project config can only narrow capabilities."
+	"notes": "Native workers use strict built-ins + --no-extensions + scope-guard. done requires a user-approved verify profile or direct verifyCommands, and approving one authorizes running the target repository's own code (see SECURITY.md). sfh write/full requires an OS sandbox. Project config can only narrow capabilities and cannot choose role models. Set limits.scopeCeiling in user config to bound ticket allowed_scope."
 }

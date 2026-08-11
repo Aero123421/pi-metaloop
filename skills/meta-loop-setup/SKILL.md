@@ -111,13 +111,14 @@ sfh は「調査 ∥ 探索 → 統合」の配管。ここでプロジェクト
 |------|------|
 | `executor.sfhToolModels.<tool>` | その tool の既定 model |
 | `executor.sfhToolEfforts.<tool>` | effort（例: `low` / `medium` / `high` — **tool 依存**） |
-| `executor.sfhToolAccess.<tool>` | `read` \| `write` \| `full`（調査は **read** 推奨） |
+| `executor.sfhToolAccess.<tool>` | 実質 `read` のみ。`write`/`full` は OS sandbox が無いため実行時に必ず拒否される |
 | `executor.sfhModel` | 全 sfh ステップの共通 model フォールバック |
 | `executor.sfhEffort` | 共通 effort フォールバック |
-| `executor.sfhAccess` | ブランチ既定 access（既定 `read`） |
+| `executor.sfhAccess` | ブランチ既定 access（`read` 固定と考えてよい） |
 | `executor.sfhIntegrateModel` | 統合ステップ model |
 | `executor.sfhIntegrateEffort` | 統合 effort |
-| `executor.sfhIntegrateAccess` | 統合 access（既定 `read`。書き込み統合は非推奨） |
+| `executor.sfhIntegrateAccess` | 統合 access（`read`） |
+| `executor.sfhIntegrateTool` | 統合ステップの tool を明示（未指定ならモデル ID から推測され、推測されたことはチケットに記録される） |
 
 解決順（ブランチ）:
 
@@ -138,10 +139,17 @@ branches[].model|effort|access
 
 Worker の `done` には controller-side verify の成功が必須。ユーザーに実行argvを表示し、承認を取る。
 
+**承認の意味を必ず伝えること**: profile が固定するのは*コマンド名*であって、その先で実行される
+コードは対象リポジトリの `package.json` やテストコードが決める。「そのリポジトリで手動で
+テストを走らせてよいか」と同じ判断になる。グローバルな `verifyCommands` より、プロジェクトごとの
+`executor.verifyProfile` 選択を勧める。
+
 - user config の `executor.verifyProfiles` に承認済みargvを保存
 - project config の `executor.verifyProfile` は、その名前を選ぶだけ
 - project から新しいprofile/argvは追加できない
-- profileを選ばない場合は安全に `partial` となることを明示
+- profileを選ばない場合は安全に `partial` となることを明示（＝ run は必ず `incomplete` で終わる）
+- `executor.verifyMode`: `per-ticket`（既定）か `final`。分解された変更で途中チケット単体では
+  tree が緑にならない場合は `final` を勧める
 
 候補はプロジェクトファイルから推測して提示する（勝手に承認しない）:
 
@@ -150,6 +158,17 @@ Worker の `done` には controller-side verify の成功が必須。ユーザ�
 - Python: `[["python","-m","pytest"]]`
 
 最後に `/ml-doctor` で、profile、実効argv、timeout、許可元、project narrowing、SFH machine schemaを表示する。
+
+#### 3e. 書き込み範囲の天井（推奨）
+
+`allowed_scope` は Orchestrator（モデル出力）が決める。`limits.scopeCeiling` を設定すると、
+その外に出るチケットは実行前にブロックされる。
+
+```json
+{ "limits": { "scopeCeiling": ["src/**", "test/**"] } }
+```
+
+プロジェクト構成から候補を提示する（`**` や無修飾の `*.ts` は証明できないため拒否される）。
 
 ### 4. Supervisor / escalation（任意・既定のままでも可）
 
@@ -194,12 +213,12 @@ Supervisor の yellow/red 根拠になる。無い事項では excess 介入し�
 
 - 一度に全部聞かない。スコープ → 役モデル → sfh → 任意、の順  
 - 分からなければ「空 = デフォルト継承」を選ばせる  
-- 調査ブランチの access を `write`/`full` にするときはリスクを一言添える  
+- `write`/`full` は提案しない。OS sandbox が無い現状では実行時に必ず拒否される  
 - この skill は**設定ウィザード**であり、orchestrate 実行そのものではない  
 
 ## やってはいけないこと
 
 - ユーザーが呼んでいないのにこの skill を走らせる  
-- sfhAllowedTools を無断で全 tool + write にする  
+- sfhAllowedTools を無断で全 tool にする / `write`・`full` access を勧める（必ず拒否される）  
 - 既存の meta-loop config を確認なしで全消し  
 - アプリのソースコードを「セットアップ」名目で改変する  

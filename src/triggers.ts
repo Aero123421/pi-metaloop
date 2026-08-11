@@ -28,15 +28,15 @@ export function evaluateTriggers(board: TaskBoard, event: RuntimeEvent, config: 
 	switch (event.kind) {
 		case "worker_failed":
 			if (event.consecutiveFailures >= config.supervisor.maxConsecutiveFailures) {
-				return { review: true, reason: `連続失敗 ${event.consecutiveFailures} 件 (${event.ticket.id})` };
+				return { review: true, reason: `${event.consecutiveFailures} consecutive failures (${event.ticket.id})` };
 			}
 			return { review: false };
 
 		case "worker_blocked":
-			return { review: true, reason: `チケット ${event.ticket.id} が前提条件不足でブロック` };
+			return { review: true, reason: `ticket ${event.ticket.id} is blocked on missing prerequisites` };
 
 		case "worker_out_of_scope":
-			return { review: true, reason: `チケット ${event.ticket.id} のスコープ逸脱の疑い` };
+			return { review: true, reason: `possible scope escape on ticket ${event.ticket.id}` };
 	}
 }
 
@@ -52,11 +52,11 @@ export function checkAutoTriggers(stats: SupervisorStats, config: MetaLoopConfig
 	const intervalMs = sup.checkIntervalMinutes * 60_000;
 	if (intervalMs > 0 && Date.now() - stats.lastReviewAt >= intervalMs) {
 		const mins = Math.round((Date.now() - stats.lastReviewAt) / 60_000);
-		return { review: true, reason: `定期検査（${mins} 分経過 / 基準 ${sup.checkIntervalMinutes} 分）` };
+		return { review: true, reason: `periodic check (${mins} min since last review; threshold ${sup.checkIntervalMinutes} min)` };
 	}
 
 	if (sup.workerStartThreshold > 0 && stats.startsSinceReview >= sup.workerStartThreshold) {
-		return { review: true, reason: `Worker 起動数 ${stats.startsSinceReview} が閾値 ${sup.workerStartThreshold} に到達` };
+		return { review: true, reason: `${stats.startsSinceReview} worker starts since last review (threshold ${sup.workerStartThreshold})` };
 	}
 
 	return { review: false };

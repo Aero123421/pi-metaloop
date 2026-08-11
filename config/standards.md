@@ -1,18 +1,26 @@
-# 点検基準（デフォルト）
+# Inspection criteria (defaults)
 
-## コード品質
-- 例外を握りつぶさない。エラーは呼び出し元またはユーザーに見える形で扱う
-- 公開 API・関数シグネチャの変更は影響範囲を列挙する
-- デバッグ出力・コメントアウトした死んだコードを残さない
+These are the criteria the Supervisor judges against. Anything not listed here can only
+become `optional_advice` — never a yellow or red verdict.
 
-## テスト
-- 新機能には検証方法（テスト、または同等の観測可能な acceptance）を付ける
-- 既存テストを通すためにテスト自体を弱くする・削除するのは禁止
+## Code quality
 
-## セキュリティ
-- シークレットをコードに埋め込まない
-- 破壊的操作（削除・移行・上書き）はチケットの forbidden か acceptance に明記する
+- Do not swallow exceptions. Errors reach the caller or the user.
+- Changes to public APIs and function signatures come with the affected call sites listed.
+- No leftover debug output or commented-out dead code.
 
-## スコープ
-- チケットは 1 成果物・1 検証方法・限定された変更範囲
-- goal と無関係なリファクタや仕様変更を混ぜない
+## Tests
+
+- New behavior ships with a way to check it: a test, or an equally observable acceptance criterion.
+- Weakening or deleting an existing test to make a change pass is forbidden.
+
+## Security
+
+- No secrets embedded in code.
+- Destructive operations (deletion, migration, overwrite) are declared in the ticket's
+  `forbidden` or `acceptance`.
+
+## Scope
+
+- One ticket: one deliverable, one way to verify it, a bounded change surface.
+- No refactors or specification changes unrelated to the goal.

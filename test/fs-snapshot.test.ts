@@ -56,7 +56,7 @@ describe("bounded implementation-worker filesystem snapshots", () => {
 			fs.writeFileSync(dirty, "uncommitted-v1\n");
 			const before = captureFilesystemSnapshot(f.cwd);
 			const unchanged = captureFilesystemSnapshot(f.cwd);
-			assert.equal(before.ok, true, before.error);
+			assert.equal(before.ok, true, before.error ?? "unknown error");
 			assert.deepEqual(diffFilesystemSnapshots(before, unchanged).changedPaths, []);
 
 			fs.writeFileSync(dirty, "uncommitted-v2\n");
@@ -76,13 +76,13 @@ describe("bounded implementation-worker filesystem snapshots", () => {
 			const ignored = path.join(f.cwd, "ignored", "cache.bin");
 			fs.writeFileSync(ignored, "v1");
 			const before = captureFilesystemSnapshot(f.cwd);
-			assert.equal(before.ok, true, before.error);
+			assert.equal(before.ok, true, before.error ?? "unknown error");
 
 			fs.writeFileSync(ignored, "v2");
 			const parentWrite = path.join(f.parent, "escaped.txt");
 			fs.writeFileSync(parentWrite, "outside");
 			const after = captureFilesystemSnapshot(f.cwd);
-			assert.equal(after.ok, true, after.error);
+			assert.equal(after.ok, true, after.error ?? "unknown error");
 
 			const evidencePaths = diffFilesystemSnapshots(before, after).changedPaths.map((p) =>
 				filesystemEvidencePath(p, f.cwd),
@@ -134,8 +134,8 @@ describe("bounded implementation-worker filesystem snapshots", () => {
 			timer = undefined;
 			assert.ok(rewrites > 0);
 			const after = captureFilesystemSnapshot(f.cwd);
-			assert.equal(before.ok, true, before.error);
-			assert.equal(after.ok, true, after.error);
+			assert.equal(before.ok, true, before.error ?? "unknown error");
+			assert.equal(after.ok, true, after.error ?? "unknown error");
 			assert.deepEqual(diffFilesystemSnapshots(before, after).changedPaths, []);
 		} finally {
 			if (timer) clearInterval(timer);
@@ -149,7 +149,7 @@ describe("bounded implementation-worker filesystem snapshots", () => {
 			const original = ownerHolder();
 			writeOwnerLock(f.cwd, original);
 			const before = captureFilesystemSnapshot(f.cwd);
-			assert.equal(before.ok, true, before.error);
+			assert.equal(before.ok, true, before.error ?? "unknown error");
 
 			for (const changed of [
 				{ pid: process.pid + 1 },

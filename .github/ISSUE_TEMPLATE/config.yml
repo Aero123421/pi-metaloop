@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup and usage questions
+    url: https://github.com/Aero123421/pi-metaloop/discussions
+    about: Configuration help and general questions belong in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/Aero123421/pi-metaloop/security/advisories/new
+    about: Report privately. Do not open a public issue.

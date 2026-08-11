@@ -465,7 +465,16 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 		}
 	}
 	if (layer.escalation && typeof layer.escalation === "object") {
-		merged.escalation = { ...merged.escalation, ...(layer.escalation as object) };
+		// Validated like every other section: an unparsed spread let a bad value
+		// through and turned every threshold comparison into NaN.
+		const E = layer.escalation as any;
+		merged.escalation = {
+			enabled: typeof E.enabled === "boolean" ? E.enabled : merged.escalation.enabled,
+			toolCallThreshold: clampInt(E.toolCallThreshold ?? merged.escalation.toolCallThreshold, 1, 100_000),
+			distinctPathThreshold: clampInt(E.distinctPathThreshold ?? merged.escalation.distinctPathThreshold, 1, 100_000),
+			writeThreshold: clampInt(E.writeThreshold ?? merged.escalation.writeThreshold, 1, 100_000),
+			promptLengthThreshold: clampInt(E.promptLengthThreshold ?? merged.escalation.promptLengthThreshold, 1, 1_000_000),
+		};
 	}
 	if (layer.executor && typeof layer.executor === "object") {
 		const ex = layer.executor as any;

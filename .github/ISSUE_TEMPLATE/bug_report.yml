@@ -1,0 +1,38 @@
+name: Bug report
+description: Something in a supervised run behaved incorrectly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not attach credentials or a complete private run directory.
+        Run artifacts under `.pi/meta-loop/runs/` contain prompts and model output.
+  - type: textarea
+    id: doctor
+    attributes:
+      label: /ml-doctor output
+      description: Run `/ml-doctor` and paste the output with private paths removed.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Node, pi, pi-meta-loop, and SFH (if installed).
+      placeholder: "node 22.19.0, pi 0.83.1, pi-meta-loop 0.3.0-rc.1, sfh 1.4.0"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened
+      description: Include the run status, board phase, and the stable SFH error code if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Smallest reproducible config
+      description: The minimum config layers needed to see it.
+      render: json

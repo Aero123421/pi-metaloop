@@ -56,7 +56,9 @@ Empty `model` = inherit pi default. Used for **pi subprocesses** (Orchestrator /
       "rust": [["cargo", "test", "--locked"]]
     },
     "verifyProfile": "node",
-    "verifyTimeoutSec": 600
+    "verifyTimeoutSec": 600,
+    "verifyMode": "per-ticket",
+    "sfhIntegrateTool": ""
   }
 }
 ```
@@ -68,6 +70,16 @@ Empty `model` = inherit pi default. Used for **pi subprocesses** (Orchestrator /
 - Define `verifyProfiles` in **user/base** config after explicit approval.
 - Project config may select an existing `verifyProfile`, keep a subset through legacy `verifyCommands`, or lower `verifyTimeoutSec`; it cannot introduce profiles or argv.
 - `/ml-doctor` shows the effective profile, argv, timeout, and config provenance.
+- **Approving a profile authorizes running the target repository's own code.** The profile fixes
+  the command; `npm test` executes whatever that repository defines. See SECURITY.md.
+
+### verifyMode
+
+- `per-ticket` (default): the full sequence runs after every native ticket.
+- `final`: runs once after the execute loop and promotes the tickets that claimed `done`. Use it
+  when intermediate tickets cannot leave the tree green on their own.
+- A baseline verify always runs once before the first ticket. A ticket failing a command that was
+  already failing then is recorded `partial` with `verify.preExisting`, never `failed`.
 
 ### Branch field resolution
 
@@ -90,7 +102,7 @@ Integrate step: `sfhIntegrate*` → `sfhModel`/`sfhEffort` → worker.model for 
 ### effort / access notes
 
 - **effort** strings are tool-defined (codex/claude often `low|medium|high`; pi may ignore unknown values)
-- **access**: `read` (no writes), `write`, `full` — **without an OS sandbox only `read` is supported** (write/full is refused at plan/execute and never marked done via post-hoc evidence alone)
+- **access**: `read` (no writes), `write`, `full` — **without an OS sandbox only `read` is supported**. `write`/`full` is refused at plan/execute, never marked done via post-hoc evidence alone, and reported at orchestrate startup and by `/ml-doctor`. Do not configure it.
 
 ## supervisor
 
@@ -120,10 +132,38 @@ Integrate step: `sfhIntegrate*` → `sfhModel`/`sfhEffort` → worker.model for 
 ```json
 "limits": {
   "maxTasks": 8,
-  "concurrency": 1,
-  "perTaskOutputCap": 51200
+  "perTaskOutputCap": 51200,
+  "maxSupervisions": 12,
+  "scopeCeiling": ["src/**", "test/**"]
 }
 ```
+
+- `maxSupervisions` bounds mid-run Supervisor audits. Initial and final audits always run.
+- `scopeCeiling` bounds every ticket's `allowed_scope`. A ticket whose scope is not provably
+  inside it is blocked before running; `**` and a bare `*.ts` are rejected. Unset means no ceiling.
+
+## evidence
+
+```json
+"evidence": {
+  "ignoreDirNames": ["node_modules", "target", ".next"],
+  "parentMaxDepth": 0,
+  "maxEntries": 250000,
+  "timeoutMs": 30000
+}
+```
+
+Bounds the post-run filesystem sweep. Ignored directories are recorded but not traversed, and the
+parent scan defaults to direct entries only — concurrent tooling writing into dependency and build
+trees is not something a ticket did. A project layer may only **widen** coverage here.
+
+## allowProjectModelOverride
+
+```json
+{ "allowProjectModelOverride": false }
+```
+
+User/base only. When false (default) a project config cannot choose `roles.*.model`.
 
 ## standards.md
 

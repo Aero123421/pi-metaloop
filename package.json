@@ -10,7 +10,7 @@
 	},
 	"homepage": "https://github.com/Aero123421/pi-metaloop#readme",
 	"bugs": "https://github.com/Aero123421/pi-metaloop/issues",
-	"files": ["agents", "config", "skills", "src", "README.md", "README.ja.md", "DESIGN.md", "CHANGELOG.md", "LICENSE", "SECURITY.md", "SUPPORT.md"],
+	"files": ["agents", "config", "examples", "skills", "src", "README.md", "README.ja.md", "DESIGN.md", "CHANGELOG.md", "LICENSE", "SECURITY.md", "SUPPORT.md"],
 	"publishConfig": {
 		"access": "public"
 	},
@@ -35,6 +35,7 @@
 		"typecheck": "tsc --noEmit",
 		"test": "node --experimental-strip-types --test --test-concurrency=1 test/**/*.test.ts",
 		"release:check": "node scripts/release-check.mjs",
+		"docs:check": "node scripts/docs-check.mjs",
 		"package:smoke": "node scripts/package-smoke.mjs"
 	},
 	"engines": {

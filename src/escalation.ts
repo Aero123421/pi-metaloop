@@ -42,8 +42,33 @@ export function noteToolCall(stats: EscalationStats, toolName: string, input: Re
 	// bash sometimes embeds paths — skip deep parsing
 }
 
-const LONG_HINT =
-	/一式|まとめて|全部|全体|移行|リファクタ|リファクタリング|対応して|実装して|作り直|置き換|マルチ|複数|エンドツーエンド|e2e|マイグレーション/i;
+/**
+ * Short-but-broad briefs that the length threshold alone would miss.
+ * Kept bilingual: the heuristic used to fire only for Japanese phrasing, so an
+ * English user got no keyword-based nudge at all.
+ */
+const LONG_HINT = new RegExp(
+	[
+		// English
+		"\\bmigrat(e|ion|ing)\\b",
+		"\\brefactor",
+		"\\brewrite\\b",
+		"\\bport\\s+(it|this|the)\\b",
+		"\\bend[- ]?to[- ]?end\\b",
+		"\\be2e\\b",
+		"\\bacross\\s+(the\\s+)?(whole|entire|codebase|repo)",
+		"\\b(whole|entire)\\s+(codebase|repo|project|app)\\b",
+		"\\ball\\s+(of\\s+)?the\\s+\\w+s\\b",
+		"\\bevery\\s+\\w+\\b",
+		"\\bmulti[- ]?(step|stage|module|service|package)",
+		"\\bimplement\\s+(the\\s+)?(whole|full|entire)\\b",
+		// Japanese
+		"一式", "まとめて", "全部", "全体", "移行", "リファクタ", "リファクタリング",
+		"対応して", "実装して", "作り直", "置き換", "マルチ", "複数",
+		"エンドツーエンド", "マイグレーション",
+	].join("|"),
+	"i",
+);
 
 export function promptLooksLong(text: string, threshold: number): boolean {
 	const t = text.trim();
@@ -63,9 +88,9 @@ export function shouldSuggestEscalation(stats: EscalationStats, settings: Escala
 
 export function escalationMessage(stats: EscalationStats): string {
 	return [
-		"[pi-metaLoop] この作業は長期化の兆候があります。",
-		`観測: tool_calls=${stats.toolCalls}, distinct_paths=${stats.paths.size}, writes=${stats.writes}`,
-		"認識ズレのコストが大きくなる前に、`orchestrate` ツールで監督付き分業（Orchestrator + Supervisor + Workers/sfh）へ切り替えることを検討してください。",
-		"短い確認・議論・1ファイル修正だけならそのままで構いません。",
+		"[pi-meta-loop] This is starting to look like a long task.",
+		`observed: tool_calls=${stats.toolCalls}, distinct_paths=${stats.paths.size}, writes=${stats.writes}`,
+		"Consider the `orchestrate` tool to switch to supervised division of labor (Orchestrator + Supervisor + Workers/sfh) before a misalignment gets expensive to undo.",
+		"Ignore this for short questions, discussion, or a single-file fix.",
 	].join("\n");
 }
