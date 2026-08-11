@@ -32,6 +32,7 @@ import {
 	generateFlowYaml,
 	renderBranchPrompt,
 	renderIntegrationPrompt,
+	runSfhPreflight,
 	runSfhFlow,
 	sanitizeId,
 	validateSfhTool,
@@ -296,6 +297,7 @@ export function formatBoardForSupervisor(board: TaskBoard, opts?: { compact?: bo
 								processExitCode: t.evidence.processExitCode,
 								actualChangedFiles: (t.evidence.actualChangedFiles || []).slice(0, compact ? 12 : 50),
 								scopeViolations: (t.evidence.scopeViolations || []).slice(0, compact ? 6 : 20),
+								sfh: t.evidence.sfh,
 							}
 						: undefined,
 				};
@@ -1072,6 +1074,26 @@ export async function runSupervisedTask(
 		// Mutating access is rejected above; keep the flag for defense-in-depth if that gate moves.
 		const needsFsEvidence = maxAccess === "write" || maxAccess === "full";
 
+		const flowFile = writeFlowFile(cwd, runId, generateFlowYaml(spec));
+		const preflight = runSfhPreflight(binary, flowFile, cwd);
+		if (!preflight.ok) {
+			ticket.status = "blocked";
+			ticket.error = [preflight.errorCode, preflight.errorMessage].filter(Boolean).join(": ") || "sfh preflight failed";
+			ticket.evidence = {
+				processExitCode: 1,
+				actualChangedFiles: [],
+				scopeViolations: [],
+				sfh: preflight.schemaVersion === undefined
+					? undefined
+					: {
+							schemaVersion: preflight.schemaVersion,
+							version: preflight.sfhVersion,
+							errorCode: preflight.errorCode,
+					  },
+			};
+			return;
+		}
+
 		const beforeSnap = captureGitSnapshot(cwd);
 		const beforeFs = needsFsEvidence ? captureFilesystemSnapshot(cwd) : null;
 		const preError = !beforeSnap.ok
@@ -1086,11 +1108,9 @@ export async function runSupervisedTask(
 			return;
 		}
 
-		const flowFile = writeFlowFile(cwd, runId, generateFlowYaml(spec));
 		const result = await runSfhFlow({
 			binary,
 			flowFile,
-			flowName,
 			cwd,
 			signal: hooks.signal,
 			wallClockSec: ex.timeoutSec * Math.max(2, branches.length + 1),
@@ -1110,6 +1130,15 @@ export async function runSupervisedTask(
 			processExitCode: result.exitCode,
 			actualChangedFiles: [...new Set([...gitEv.actualChangedFiles, ...fsEv.actualChangedFiles])],
 			scopeViolations: [...new Set([...gitEv.scopeViolations, ...fsEv.scopeViolations])],
+			sfh: result.schemaVersion === undefined
+				? undefined
+				: {
+						schemaVersion: result.schemaVersion,
+						version: result.sfhVersion,
+						runId: result.runId,
+						runDir: result.runDir,
+						errorCode: result.errorCode,
+				  },
 		};
 
 		const fatalError = gitEv.fatalError ?? fsEv.fatalError;
@@ -1129,7 +1158,9 @@ export async function runSupervisedTask(
 				`access: ${maxAccess}`,
 				result.costUsd !== undefined ? `cost: $${result.costUsd.toFixed(2)}` : "",
 				result.elapsedSec !== undefined ? `elapsed: ${result.elapsedSec}s` : "",
+				result.runId ? `run_id: ${result.runId}` : "",
 				result.runDir ? `run_dir: ${result.runDir}` : "",
+				result.sfhVersion ? `sfh: ${result.sfhVersion} schema=${result.schemaVersion}` : "",
 				`flow: ${flowName}`,
 			]
 				.filter(Boolean)
@@ -1159,7 +1190,13 @@ export async function runSupervisedTask(
 			ticket.error =
 				result.exitCode === 0
 					? `sfh exit 0 but scope/access violations:\n${evidence.scopeViolations.join("\n")}`
-					: `sfh exit ${result.exitCode}: ${(result.stderr || result.stdout).slice(-1000)}`;
+					: [
+							`sfh exit ${result.exitCode}`,
+							result.errorCode,
+							result.errorMessage ?? (result.stderr || result.stdout).slice(-1000),
+					  ]
+							.filter(Boolean)
+							.join(": ");
 			ticket.evidence = evidence;
 			ticket.report = result.stdout.slice(0, cap);
 		}

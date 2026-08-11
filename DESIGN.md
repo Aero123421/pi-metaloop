@@ -1,4 +1,4 @@
-# DESIGN — pi-meta-loop (0.2.6-alpha)
+# DESIGN — pi-meta-loop (0.3.0-rc.1)
 
 ## 正体
 
@@ -17,6 +17,7 @@
 Project config は user/default の能力を**狭めるだけ**（sfhBinary 変更・access 引き上げ・allowlist 拡大は不可）。
 Native Worker の effective tools は `WORKER_TOOLS` 厳密 allowlist 交差。`--no-extensions` + scope-guard のみロード。tool_call guard も bash を無条件拒否。
 ビルド/テストは `executor.verifyCommands` による controller 側 trusted deterministic verify（未設定・失敗・timeout 時は done 禁止）。
+User/baseは承認済みargvを`verifyProfiles`として定義でき、projectは既存`verifyProfile`を選ぶだけ。未知profileはdeny-all。
 
 ## 監査
 
@@ -49,6 +50,7 @@ folder が legacy に勝つ。standards は優先度高い層を cap 内で優�
 - **0.2.4**: scope は **ticket delta のみ**（前チケットの dirty を違反にしない）。sfh パネルは live/直近45s のみ。停止は `/ml-stop`・`runs/<id>/STOP`・`force=true`。integrate access は branch の max に昇格、codex model なら tool=codex
 - **0.2.5**: mid-review compact board；verdictHistory 永続化；Orchestrator は短いスライス計画；`/tasks` ドリルダウン；user config で sfh full 天井（project の full が効く）
 - **0.2.6**: allowed_scope の globstar (`crates/**/tests/**`) を正しく解釈。末尾ディレクトリ自体と子ファイルを同じ規則で許可し、security test directory の偽 scope violation を防止
+- **0.3.0-rc.1**: `/ml-doctor`、config/board schema version、SFH `preflight/run --json` schema-v1契約、run ID直接保存、配布契約を追加
 
 ## 既知の限界（α）
 
@@ -57,5 +59,6 @@ folder が legacy に勝つ。standards は優先度高い層を cap 内で優�
 - background 中に Primary が同じ tree を編集すると Worker と衝突しうる（ユーザー判断）
 - チケット実行中の壁時計 Supervisor は未実装（チケット境界）
 - nesting guard は協調的経路向け
+- role/SFH subprocessはprovider credentialsのためhost environmentを継承する（値はdoctor/logに出さない）
 - クラッシュ後の run は session_start で `stopped` に落とす（自動再開なし）
 - project config は access/tools を**広げられない**（user 層で ceiling を上げる）

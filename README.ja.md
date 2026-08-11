@@ -1,6 +1,6 @@
 # pi-meta-loop
 
-**Status: 0.2.0-alpha（実験的）。** [pi](https://github.com/earendil-works/pi) 向け適応型監督オーケストレーション。
+**Status: リリース候補。正確な版は `package.json` を参照。** [pi](https://github.com/earendil-works/pi) 向け適応型監督オーケストレーション。
 
 短いタスクは軽いまま。長いタスクは Orchestrator + Supervisor + Worker/sfh。**初回監査は fail-closed**、完了は **evidence ベース**、権限は **能力境界**（プロンプトだけに頼らない）。
 
@@ -28,6 +28,12 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Aero123421/SimpleFlowHa
 ```
 
 sfh 未インストールの場合、グループチケットはインストール手順付きのエラーでブロックされる（通常チケットはそのまま動く）。
+
+| 依存 | 対応範囲 |
+|---|---|
+| Node.js | `>=22.19.0` |
+| pi / pi-ai | `^0.83.0` |
+| SFH | `>=1.4.0`、machine schema `1`（`sfh run/preflight --json`） |
 
 ## 動作
 
@@ -94,7 +100,7 @@ Supervisor は基準を判定根拠にする。**基準にない事項は option
 
 ```bash
 pi install git:github.com/Aero123421/pi-metaloop
-pi install /path/to/pi-metaLoop
+pi install /path/to/pi-meta-loop
 ```
 
 または `~/.pi/agent/settings.json` の `extensions` にパスを追加。
@@ -105,7 +111,7 @@ pi install /path/to/pi-metaLoop
 /skill:meta-loop-setup
 ```
 
-対話で user/project スコープ、役別モデル、sfh の許可 tool・model/effort/access、standards を決め、`~/.pi/agent/meta-loop/` や `.pi/meta-loop/` に書き出す。
+対話でuser/projectスコープ、役別モデル、sfh設定、承認済みverify profile、standardsを決め、`~/.pi/agent/meta-loop/`や`.pi/meta-loop/`に書き出す。
 
 ## 設定
 
@@ -166,6 +172,20 @@ sfh はステップ単位で `model` を取れる。ブランチごとの解決�
 
 例: `examples/user-meta-loop.config.example.json` / `examples/project-meta-loop.config.example.json`
 
+### trusted verify profile
+
+Native Worker の`done`にはcontroller-side verifyの成功が必須。user configで承認済みargvを定義し、project configはprofile名だけを選ぶ。
+
+```jsonc
+// user: ~/.pi/agent/meta-loop/config.json
+{ "executor": { "verifyProfiles": { "node": [["npm", "test"], ["npm", "run", "typecheck"]] } } }
+
+// project: .pi/meta-loop/config.json
+{ "executor": { "verifyProfile": "node", "verifyTimeoutSec": 600 } }
+```
+
+Projectから新しいprofileやargvは追加できない。未設定・失敗・timeout時は安全に`partial`となる。`/ml-doctor`で実効profile、argv、timeout、許可元を確認できる。
+
 その他のキー:
 
 - `enabled` — 全体キルスイッチ
@@ -178,6 +198,8 @@ sfh はステップ単位で `model` を取れる。ブランチごとの解決�
 - `executor.sfhBinary` — sfh バイナリ名/パス（標準 `sfh`）
 - `executor.timeoutSec` — グループごとの壁時計上限（標準 1800）
 - `executor.maxParallel` — sfh の最大並列数（標準 4）
+- `executor.sfhAllowedTools` — 省略で制限なし、`[]`で全拒否、非空配列でallowlist
+- `executor.verifyProfiles` / `verifyProfile` — user承認済みargvとproject選択
 - `limits.maxTasks` — チケット上限（標準 8）
 - `limits.perTaskOutputCap` — サブプロセスごとの出力上限
 
@@ -198,7 +220,7 @@ Orchestrator は、調査・探索・比較のような並列向き作業を複�
 }
 ```
 
-runtime は `flow.yaml` を生成（`.pi/meta-loop/flows/` に保存）し、`PI_META_LOOP_DEPTH=1` を env に持って `sfh run` をフォアグラウンド実行する。統合報告（sfh の stdout）とコスト/経過時間はボードに回収される。実行中のライブ進捗は TUI モニターが表示する。
+runtimeは`flow.yaml`を生成し、`sfh preflight --json`で検査後、`PI_META_LOOP_DEPTH=1`を持って`sfh run --json`を実行する。machine schema `1`、run ID、run dir、stable error codeを直接検証・保存する。
 
 実装チケットはネイティブ（Worker の pi サブプロセス）のまま。グループは並列化できる調査系作業専用。
 
@@ -211,6 +233,7 @@ runtime は `flow.yaml` を生成（`.pi/meta-loop/flows/` に保存）し、`PI
 - `/verdicts` — Supervisor の判定履歴
 - `/ml-stop` — 実行中の supervised run を中断
 - `/ml-runs` — ディスク上の run 履歴（`.pi/meta-loop/runs/`）
+- `/ml-doctor` — native done条件とSFH machine/preflight診断
 - `/sfh` — sfh 実行履歴。`/sfh stop` で最新 run 停止
 - supervised 中は **色付き統合パネル**（meta-loop + sfh）とフッターで進捗表示
 - `/ml-ui` — 詳細度 `compact|normal|full`（`show`/`hide` 可）。ショートカット `ctrl+shift+m`
@@ -224,8 +247,9 @@ runtime は `flow.yaml` を生成（`.pi/meta-loop/flows/` に保存）し、`PI
 ## 開発
 
 ```bash
-npm install
+npm ci
 npm run typecheck    # tsc --noEmit (strict)
+npm test
 ```
 
 ## セキュリティ
@@ -248,6 +272,7 @@ npm run typecheck    # tsc --noEmit (strict)
 - [x] 0.2.5 — mid-review compact、verdictHistory、短い計画、/tasks ドリルダウン、user sfh full 天井
 - [x] 0.2.6 — globstar scope 判定（`**/tests/**` のディレクトリ自体も許可）
 - [x] 0.2.6 — Worker bash 廃止（built-in のみ）/ sfh write/full は OS sandbox なしで拒否
+- [x] 0.3.0-rc.1 — verify profiles / `/ml-doctor` / SFH machine envelope / 配布契約
 - [ ] Phase 3 — ハーネス診断（反復障害から rules/skills/prompts の弱点指摘）
 - [ ] Phase 4 — 進化ループ（ログとスコアの蓄積、外側 improver）— 研究寄り、任意
 

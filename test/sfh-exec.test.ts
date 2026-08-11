@@ -10,6 +10,7 @@ import {
 	generateFlowYaml,
 	isSfhPresetTool,
 	killSfhProcessTree,
+	parseSfhRunEnvelope,
 	runSfhFlow,
 	sanitizeId,
 	validateSfhAccess,
@@ -241,6 +242,38 @@ describe("sanitizeId", () => {
 	});
 });
 
+describe("sfh run machine envelope", () => {
+	it("accepts schema v1 and rejects drift/non-terminal success", () => {
+		const parsed = parseSfhRunEnvelope(JSON.stringify({
+			schema_version: 1,
+			command: "run",
+			ok: true,
+			terminal: true,
+			exit_code: 0,
+			run_id: "run-1",
+			run_dir: "/tmp/run-1",
+			result: "ok",
+		}));
+		assert.equal(parsed.ok, true);
+		assert.equal(parseSfhRunEnvelope('{"schema_version":2}').ok, false);
+		assert.equal(parseSfhRunEnvelope(JSON.stringify({
+			schema_version: 1,
+			command: "run",
+			ok: false,
+			exit_code: 0,
+		})).ok, false);
+		assert.equal(parseSfhRunEnvelope(JSON.stringify({
+			schema_version: 1,
+			command: "run",
+			ok: true,
+			terminal: false,
+			exit_code: 0,
+			run_id: "run-1",
+			run_dir: "/tmp/run-1",
+		})).ok, false);
+	});
+});
+
 describe("writeFlowFile path containment", () => {
 	it("rejects symlink/junction flow directory escaping project cwd", () => {
 		const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ml-sfh-flow-sym-"));
@@ -267,7 +300,7 @@ describe("writeFlowFile path containment", () => {
 	it("writes under real .pi/meta-loop/flows inside cwd", () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ml-sfh-flow-ok-"));
 		const file = writeFlowFile(cwd, "ticket-ok", "api_version: 1\nname: \"ok\"\n");
-		assert.ok(file.startsWith(cwd));
+		assert.ok(file.startsWith(fs.realpathSync(cwd)));
 		assert.ok(fs.existsSync(file));
 		assert.match(file.replace(/\\/g, "/"), /\.pi\/meta-loop\/flows\/ticket-ok\.flow\.yaml$/);
 	});
@@ -280,7 +313,6 @@ describe("runSfhFlow abort", () => {
 		const result = await runSfhFlow({
 			binary: "definitely-not-a-real-sfh-binary",
 			flowFile: "missing.flow.yaml",
-			flowName: "x",
 			cwd: process.cwd(),
 			signal: controller.signal,
 		});
@@ -295,7 +327,6 @@ describe("runSfhFlow abort", () => {
 			// normally/nonzero; no abort escalation timer should delay settlement.
 			binary: process.execPath,
 			flowFile: "unused.flow.yaml",
-			flowName: "normal-exit-fixture",
 			cwd: process.cwd(),
 		});
 		assert.notEqual(result.exitCode, 0);
@@ -350,7 +381,6 @@ describe("runSfhFlow abort", () => {
 				run = runSfhFlow({
 					binary,
 					flowFile: grandchildPidFile,
-					flowName: "fixture",
 					cwd: dir,
 					signal: controller.signal,
 				});

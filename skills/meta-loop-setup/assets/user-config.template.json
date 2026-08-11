@@ -1,4 +1,5 @@
 {
+	"config_version": 1,
 	"roles": {
 		"orchestrator": {
 			"model": ""
@@ -15,7 +16,6 @@
 		"sfhBinary": "sfh",
 		"timeoutSec": 1800,
 		"maxParallel": 4,
-		"sfhAllowedTools": [],
 		"sfhModel": "",
 		"sfhEffort": "",
 		"sfhAccess": "read",
@@ -39,7 +39,13 @@
 		},
 		"sfhIntegrateModel": "",
 		"sfhIntegrateEffort": "",
-		"sfhIntegrateAccess": "read"
+		"sfhIntegrateAccess": "read",
+		"verifyProfiles": {
+			"node": [["npm", "test"], ["npm", "run", "typecheck"]],
+			"rust": [["cargo", "test", "--locked"], ["cargo", "clippy", "--locked", "--", "-D", "warnings"]],
+			"python": [["python", "-m", "pytest"]]
+		},
+		"verifyTimeoutSec": 600
 	},
 	"supervisor": {
 		"auto": true,

@@ -1,7 +1,7 @@
 ---
 name: meta-loop-setup
 description: >-
-  Explicitly set up pi-metaLoop for this machine and/or project.
+  Explicitly set up pi-meta-loop for this machine and/or project.
   Use when the user asks to configure meta-loop, assign Orchestrator/Supervisor/Worker
   models, choose sfh tools/models/effort/access, write standards, or install/verify
   sfh and the extension. Invoke via /skill:meta-loop-setup. Do not run unsolicited.
@@ -10,7 +10,7 @@ description: >-
 # meta-loop-setup
 
 ユーザーが**明示的に呼び出したときだけ**実行するセットアップスキル。  
-pi-metaLoop（監督付き分業）を、このマシン / このプロジェクト向けに設定ファイルとして書き出す。
+pi-meta-loop（監督付き分業）を、このマシン / このプロジェクト向けに設定ファイルとして書き出す。
 
 ## ゴール
 
@@ -19,6 +19,7 @@ pi-metaLoop（監督付き分業）を、このマシン / このプロジェク
    - スコープ（user 全体 / このプロジェクト / 両方）
    - **roles**: orchestrator / supervisor / worker の model（と必要なら tools）
    - **sfh**: 使える tool 白リスト、tool 別 model / effort / access、統合ステップ設定
+   - **verify**: native ticket の完了を許可する argv profile と timeout
    - supervisor フック閾値、escalation、limits（任意）
    - プロジェクト standards.md（任意）
 3. 設定を正しいパスに書き、要約を見せて確認を取る  
@@ -98,7 +99,7 @@ sfh は「調査 ∥ 探索 → 統合」の配管。ここでプロジェクト
 
 #### 3a. 許可 tool（白リスト）
 
-`executor.sfhAllowedTools` — 空配列または省略 = 制限なし。  
+`executor.sfhAllowedTools` — 省略 = 制限なし、`[]` = 全拒否、非空配列 = allowlist。
 プロジェクトでは絞るのが安全:
 
 例: `["pi", "opencode"]`  
@@ -133,6 +134,23 @@ branches[].model|effort|access
 - `executor.timeoutSec`（既定 1800）
 - `executor.sfhBinary`（既定 `sfh`。PATH に無いときフルパス）
 
+#### 3d. native verify（必須確認）
+
+Worker の `done` には controller-side verify の成功が必須。ユーザーに実行argvを表示し、承認を取る。
+
+- user config の `executor.verifyProfiles` に承認済みargvを保存
+- project config の `executor.verifyProfile` は、その名前を選ぶだけ
+- project から新しいprofile/argvは追加できない
+- profileを選ばない場合は安全に `partial` となることを明示
+
+候補はプロジェクトファイルから推測して提示する（勝手に承認しない）:
+
+- Node: `[["npm","test"],["npm","run","typecheck"]]`
+- Rust: `[["cargo","test","--locked"],["cargo","clippy","--locked","--","-D","warnings"]]`
+- Python: `[["python","-m","pytest"]]`
+
+最後に `/ml-doctor` で、profile、実効argv、timeout、許可元、project narrowing、SFH machine schemaを表示する。
+
 ### 4. Supervisor / escalation（任意・既定のままでも可）
 
 - `supervisor.checkIntervalMinutes`（30）
@@ -165,6 +183,7 @@ Supervisor の yellow/red 根拠になる。無い事項では excess 介入し�
   1. pi を再起動 or /reload
   2. 長期タスクで「orchestrate で」と頼む、または長い作業を始める
   3. /tasks  /verdicts  /sfh
+  4. /ml-doctor で native done と SFH preflight を確認
 ```
 
 不要ならコミットしない（設定はユーザー環境のことが多い）。プロジェクトの `.pi/meta-loop/` をコミットするかはユーザーに聞く。

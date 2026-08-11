@@ -46,6 +46,9 @@ export interface ExecutorSettings {
 	 * undefined/[] → verify unset → done forbidden. Project cannot introduce commands.
 	 */
 	verifyCommands?: string[][];
+	/** User/base-approved named argv sets; project may select but never define these. */
+	verifyProfiles?: Record<string, string[][]>;
+	verifyProfile?: string;
 	/** Wall-clock budget for the full verify sequence (seconds). */
 	verifyTimeoutSec?: number;
 }
@@ -78,6 +81,8 @@ export interface MetaLoopConfig {
 	 */
 	sfhAccessCeiling?: SfhAccessCeiling;
 }
+
+export const CONFIG_VERSION = 1;
 
 const READ_TOOLS = ["read", "ls", "find", "grep"];
 /**
@@ -135,6 +140,16 @@ function verifyCommandKey(argv: string[]): string {
 	return JSON.stringify(argv);
 }
 
+function normalizeVerifyProfiles(raw: unknown): Record<string, string[][]> | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const profiles: Record<string, string[][]> = {};
+	for (const [name, commands] of Object.entries(raw)) {
+		if (!name.trim()) continue;
+		profiles[name] = normalizeVerifyCommands(commands) ?? [];
+	}
+	return profiles;
+}
+
 /** Project may only keep a subset of base verify commands — never introduce new ones. */
 function narrowVerifyCommands(
 	ceiling: string[][] | undefined,
@@ -175,6 +190,8 @@ const defaultConfig: MetaLoopConfig = {
 		sfhIntegrateAccess: "read",
 		// unset → native done forbidden until user/base configures trusted verify
 		verifyCommands: undefined,
+		verifyProfiles: {},
+		verifyProfile: undefined,
 		verifyTimeoutSec: DEFAULT_VERIFY_TIMEOUT_SEC,
 	},
 	escalation: { ...defaultEscalation },
@@ -194,10 +211,19 @@ function repoRoot(): string {
 function readJsonIfExists(p: string): Record<string, unknown> | null {
 	try {
 		if (!fs.existsSync(p)) return null;
-		return JSON.parse(fs.readFileSync(p, "utf-8"));
+		const value = JSON.parse(fs.readFileSync(p, "utf-8")) as unknown;
+		if (!value || typeof value !== "object" || Array.isArray(value)) {
+			throw new Error("config root must be a JSON object");
+		}
+		const parsed = value as Record<string, unknown>;
+		if (parsed.config_version !== undefined && parsed.config_version !== CONFIG_VERSION) {
+			throw new Error(`unsupported config_version ${String(parsed.config_version)} (supported: ${CONFIG_VERSION})`);
+		}
+		return parsed;
 	} catch (err) {
 		console.error(`[pi-meta-loop] failed to read config ${p}:`, err);
-		return null;
+		// A present but unreadable layer must never silently broaden capabilities.
+		return { enabled: false };
 	}
 }
 
@@ -319,6 +345,10 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 			const projectVerify = Array.isArray(ex.verifyCommands)
 				? normalizeVerifyCommands(ex.verifyCommands)
 				: undefined;
+			const requestedProfile = typeof ex.verifyProfile === "string" ? ex.verifyProfile.trim() : undefined;
+			const profileCommands = requestedProfile
+				? cur.verifyProfiles?.[requestedProfile]
+				: undefined;
 			merged.executor = {
 				...cur,
 				sfhEnabled: ex.sfhEnabled === false ? false : cur.sfhEnabled,
@@ -346,16 +376,29 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 				sfhToolAccess: mergeAccessMap(cur.sfhToolAccess, ex.sfhToolAccess, cur.sfhAccess),
 				// sfhBinary intentionally not overridable by project
 				sfhBinary: cur.sfhBinary,
-				verifyCommands: narrowVerifyCommands(cur.verifyCommands, projectVerify),
+				verifyProfiles: cur.verifyProfiles,
+				verifyProfile: requestedProfile ?? cur.verifyProfile,
+				verifyCommands: requestedProfile
+					? profileCommands === undefined
+						? []
+						: narrowVerifyCommands(profileCommands, projectVerify)
+					: narrowVerifyCommands(cur.verifyCommands, projectVerify),
 				verifyTimeoutSec: Math.min(
 					cur.verifyTimeoutSec ?? DEFAULT_VERIFY_TIMEOUT_SEC,
 					clampInt(ex.verifyTimeoutSec ?? cur.verifyTimeoutSec ?? DEFAULT_VERIFY_TIMEOUT_SEC, 5, 86_400),
 				),
 			};
 		} else {
+			const profiles = {
+				...(cur.verifyProfiles ?? {}),
+				...(normalizeVerifyProfiles(ex.verifyProfiles) ?? {}),
+			};
+			const requestedProfile = typeof ex.verifyProfile === "string" ? ex.verifyProfile.trim() : cur.verifyProfile;
 			const baseVerify = Array.isArray(ex.verifyCommands)
 				? normalizeVerifyCommands(ex.verifyCommands)
-				: cur.verifyCommands;
+				: requestedProfile
+					? profiles[requestedProfile]
+					: cur.verifyCommands;
 			merged.executor = {
 				...cur,
 				...ex,
@@ -364,6 +407,8 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 				sfhToolAccess: { ...(cur.sfhToolAccess ?? {}), ...(ex.sfhToolAccess && typeof ex.sfhToolAccess === "object" ? ex.sfhToolAccess : {}) },
 				sfhAllowedTools: Array.isArray(ex.sfhAllowedTools) ? ex.sfhAllowedTools.map(String) : cur.sfhAllowedTools,
 				verifyCommands: baseVerify === undefined ? cur.verifyCommands : baseVerify,
+				verifyProfiles: profiles,
+				verifyProfile: requestedProfile,
 				verifyTimeoutSec:
 					ex.verifyTimeoutSec === undefined
 						? cur.verifyTimeoutSec
@@ -432,6 +477,13 @@ function cloneDefault(): MetaLoopConfig {
 					? undefined
 					: defaultConfig.executor.verifyCommands.map((c) => [...c]),
 			verifyTimeoutSec: defaultConfig.executor.verifyTimeoutSec,
+			verifyProfiles: Object.fromEntries(
+				Object.entries(defaultConfig.executor.verifyProfiles ?? {}).map(([name, commands]) => [
+					name,
+					commands.map((command) => [...command]),
+				]),
+			),
+			verifyProfile: defaultConfig.executor.verifyProfile,
 		},
 		escalation: { ...defaultConfig.escalation },
 		limits: { ...defaultConfig.limits },
@@ -496,6 +548,56 @@ export function loadConfig(cwd: string): MetaLoopConfig {
 	// Scoped native workers never receive bash, regardless of alias/args/config requests.
 	enforceNativeWorkerToolPolicy(merged);
 	return merged;
+}
+
+export interface VerifyDiagnostics {
+	donePossible: boolean;
+	commands: string[][];
+	timeoutSec: number;
+	allowedBy: string;
+	narrowedBy: string[];
+	profile?: string;
+	problem?: string;
+}
+
+/** Explain the effective trusted-verify gate without exposing unrelated config. */
+export function getVerifyDiagnostics(cwd: string, config = loadConfig(cwd)): VerifyDiagnostics {
+	const userDir = path.join(getAgentDir(), "meta-loop");
+	const candidates = [
+		{ label: "repository defaults", file: path.join(repoRoot(), "config", "meta-loop.json"), project: false },
+		{ label: "user config", file: path.join(userDir, "config.json"), project: false },
+		{ label: "legacy project config", file: path.join(cwd, CONFIG_DIR_NAME, "meta-loop.json"), project: true },
+		{ label: "project config", file: path.join(cwd, CONFIG_DIR_NAME, "meta-loop", "config.json"), project: true },
+	];
+	let allowedBy = "not configured";
+	const narrowedBy: string[] = [];
+	for (const candidate of candidates) {
+		const raw = readJsonIfExists(candidate.file);
+		const executor = raw?.executor;
+		if (
+			!executor ||
+			typeof executor !== "object" ||
+			!("verifyCommands" in executor || "verifyProfiles" in executor || "verifyProfile" in executor)
+		) continue;
+		if (candidate.project) narrowedBy.push(candidate.label);
+		else allowedBy = candidate.label;
+	}
+	const commands = config.executor.verifyCommands ?? [];
+	const profile = config.executor.verifyProfile;
+	const problem = profile && !(profile in (config.executor.verifyProfiles ?? {}))
+		? `unknown verifyProfile ${JSON.stringify(profile)}; define it in user config`
+		: commands.length === 0
+			? "no trusted verify argv; native done is forbidden"
+			: undefined;
+	return {
+		donePossible: commands.length > 0,
+		commands,
+		timeoutSec: config.executor.verifyTimeoutSec ?? DEFAULT_VERIFY_TIMEOUT_SEC,
+		allowedBy,
+		narrowedBy,
+		profile,
+		problem,
+	};
 }
 
 const STANDARDS_CAP = 8000;

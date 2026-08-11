@@ -63,8 +63,102 @@ export interface SfhRunResult {
 	stdout: string;
 	stderr: string;
 	runDir?: string;
+	runId?: string;
 	costUsd?: number;
 	elapsedSec?: number;
+	schemaVersion?: number;
+	sfhVersion?: string;
+	state?: string;
+	errorCode?: string;
+	errorMessage?: string;
+}
+
+export interface SfhRunEnvelope {
+	schema_version: 1;
+	command: "run";
+	ok: boolean;
+	exit_code: number;
+	terminal?: boolean;
+	state?: string;
+	run_id?: string;
+	run_dir?: string;
+	result?: string;
+	cost_usd?: number;
+	sfh_version?: string;
+	error?: { code?: string; message?: string } | null;
+}
+
+export type SfhRunEnvelopeParseResult =
+	| { ok: true; envelope: SfhRunEnvelope }
+	| { ok: false; error: string };
+
+/** Parse the stable SFH v1 machine envelope. Unknown schemas fail closed. */
+export function parseSfhRunEnvelope(raw: string): SfhRunEnvelopeParseResult {
+	let value: unknown;
+	try {
+		value = JSON.parse(raw);
+	} catch {
+		return { ok: false, error: "sfh --json returned invalid JSON" };
+	}
+	if (!value || typeof value !== "object") return { ok: false, error: "sfh --json returned a non-object envelope" };
+	const envelope = value as Record<string, unknown>;
+	if (envelope.schema_version !== 1) {
+		return { ok: false, error: `unsupported sfh schema_version: ${String(envelope.schema_version)}` };
+	}
+	if (envelope.command !== "run") {
+		return { ok: false, error: `unexpected sfh envelope command: ${String(envelope.command)}` };
+	}
+	if (typeof envelope.ok !== "boolean" || typeof envelope.exit_code !== "number") {
+		return { ok: false, error: "sfh run envelope is missing ok/exit_code" };
+	}
+	if (envelope.ok !== (envelope.exit_code === 0)) {
+		return { ok: false, error: "sfh run envelope has inconsistent ok/exit_code" };
+	}
+	if (envelope.ok === true && envelope.terminal !== true) {
+		return { ok: false, error: "sfh foreground run returned a non-terminal envelope" };
+	}
+	if (envelope.ok === true && (typeof envelope.run_id !== "string" || typeof envelope.run_dir !== "string")) {
+		return { ok: false, error: "sfh success envelope is missing run_id/run_dir" };
+	}
+	return { ok: true, envelope: envelope as unknown as SfhRunEnvelope };
+}
+
+export interface SfhPreflightResult {
+	ok: boolean;
+	schemaVersion?: number;
+	sfhVersion?: string;
+	errorCode?: string;
+	errorMessage?: string;
+}
+
+/** Free, flow-specific capability check using SFH's machine contract. */
+export function runSfhPreflight(binary: string, flowFile: string | undefined, cwd: string): SfhPreflightResult {
+	try {
+		const run = spawnSync(binary, ["preflight", ...(flowFile ? [flowFile] : []), "--json"], {
+			cwd,
+			encoding: "utf-8",
+			timeout: 30_000,
+			windowsHide: true,
+		});
+		if (run.error) throw run.error;
+		const envelope = JSON.parse(String(run.stdout ?? "")) as Record<string, any>;
+		if (envelope.schema_version !== 1 || envelope.command !== "preflight") {
+			return { ok: false, errorCode: "SFH_SCHEMA_UNSUPPORTED", errorMessage: `unsupported sfh preflight envelope (schema=${String(envelope.schema_version)})` };
+		}
+		return {
+			ok: run.status === 0 && envelope.ok === true,
+			schemaVersion: 1,
+			sfhVersion: typeof envelope.sfh_version === "string" ? envelope.sfh_version : undefined,
+			errorCode: typeof envelope.error?.code === "string" ? envelope.error.code : undefined,
+			errorMessage: typeof envelope.error?.message === "string" ? envelope.error.message : undefined,
+		};
+	} catch (err) {
+		return {
+			ok: false,
+			errorCode: "SFH_PREFLIGHT_INVALID",
+			errorMessage: err instanceof Error ? err.message : String(err),
+		};
+	}
 }
 
 export function sanitizeId(id: string): string {
@@ -279,33 +373,6 @@ export function writeFlowFile(cwd: string, ticketId: string, yaml: string): stri
 	return file;
 }
 
-/** Find the newest run dir whose flow name matches (for cost/status recovery). */
-export function findRunDirForFlow(cwd: string, flowName: string): { runDir: string; costUsd?: number; elapsedSec?: number } | null {
-	const root = path.join(cwd, ".sfh", "runs");
-	try {
-		if (!fs.existsSync(root)) return null;
-		const entries = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory());
-		let best: { runDir: string; mtime: number; costUsd?: number; elapsedSec?: number } | null = null;
-		for (const e of entries) {
-			const runDir = path.join(root, e.name);
-			try {
-				const status = JSON.parse(fs.readFileSync(path.join(runDir, "status.json"), "utf-8"));
-				if (status.flow !== flowName) continue;
-				const mtime = fs.statSync(path.join(runDir, "status.json")).mtimeMs;
-				if (!best || mtime > best.mtime) {
-					best = { runDir, mtime, costUsd: status.cost_usd, elapsedSec: status.elapsed_sec };
-				}
-			} catch {
-				// skip unreadable runs
-			}
-		}
-		if (!best) return null;
-		return { runDir: best.runDir, costUsd: best.costUsd, elapsedSec: best.elapsedSec };
-	} catch {
-		return null;
-	}
-}
-
 /**
  * Kill an sfh process tree.
  * - win32: `taskkill /pid <pid> /T /F` when force is requested (full tree)
@@ -362,7 +429,6 @@ export function killSfhProcessTree(
 export function runSfhFlow(opts: {
 	binary: string;
 	flowFile: string;
-	flowName: string;
 	cwd: string;
 	signal?: AbortSignal;
 	/** Hard wall clock for the whole sfh process (seconds) */
@@ -373,6 +439,7 @@ export function runSfhFlow(opts: {
 		return Promise.resolve({ exitCode: 1, stdout: "", stderr: "aborted before sfh spawn" });
 	}
 	return new Promise((resolve) => {
+		const startedAt = Date.now();
 		const depth = Number.parseInt(process.env.PI_META_LOOP_DEPTH ?? "0", 10) || 0;
 		const terminationSchedule = getProcessTreeTerminationSchedule(
 			process.platform,
@@ -380,7 +447,7 @@ export function runSfhFlow(opts: {
 		);
 		const isWin = process.platform === "win32";
 		// POSIX: new process group so we can kill(-pid) the whole tree on abort.
-		const proc = spawn(opts.binary, ["run", opts.flowFile], {
+		const proc = spawn(opts.binary, ["run", opts.flowFile, "--json"], {
 			cwd: opts.cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
@@ -407,19 +474,38 @@ export function runSfhFlow(opts: {
 			wallTimer = undefined;
 			postForceTimer = undefined;
 		};
-		const finish = (exitCode: number) => {
+		const finish = (processExitCode: number) => {
 			if (settled) return;
 			settled = true;
 			clearTimers();
 			opts.signal?.removeEventListener("abort", onAbort);
-			const run = findRunDirForFlow(opts.cwd, opts.flowName);
+			if (aborted || timedOut) {
+				resolve({ exitCode: 1, stdout: "", stderr });
+				return;
+			}
+			const parsed = parseSfhRunEnvelope(stdout);
+			if (!parsed.ok) {
+				resolve({
+					exitCode: 1,
+					stdout: "",
+					stderr: `${stderr}\n[pi-meta-loop] ${parsed.error}`.trim(),
+				});
+				return;
+			}
+			const envelope = parsed.envelope;
 			resolve({
-				exitCode,
-				stdout,
+				exitCode: processExitCode === 0 ? envelope.exit_code : processExitCode,
+				stdout: typeof envelope.result === "string" ? envelope.result : "",
 				stderr,
-				runDir: run?.runDir,
-				costUsd: run?.costUsd,
-				elapsedSec: run?.elapsedSec,
+				runDir: envelope.run_dir,
+				runId: envelope.run_id,
+				costUsd: envelope.cost_usd,
+				elapsedSec: Math.round(Date.now() - startedAt) / 1000,
+				schemaVersion: envelope.schema_version,
+				sfhVersion: envelope.sfh_version,
+				state: envelope.state,
+				errorCode: envelope.error?.code,
+				errorMessage: envelope.error?.message,
 			});
 		};
 		const waitAfterForce = (forceSucceeded: boolean) => {

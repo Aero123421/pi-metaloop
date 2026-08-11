@@ -13,50 +13,61 @@ Later layers win. `sfhToolModels` / `sfhToolEfforts` / `sfhToolAccess` are deep-
 ## roles
 
 ```json
-"roles": {
-  "orchestrator": { "model": "provider/model-id", "tools": ["read","ls","find","grep"] },
-  "supervisor":   { "model": "provider/model-id", "tools": ["read","ls","find","grep"] },
-  "worker":       { "model": "provider/model-id", "tools": ["read","write","edit","ls","find","grep"] }
+{
+  "config_version": 1,
+  "roles": {
+    "orchestrator": { "model": "provider/model-id", "tools": ["read","ls","find","grep"] },
+    "supervisor":   { "model": "provider/model-id", "tools": ["read","ls","find","grep"] },
+    "worker":       { "model": "provider/model-id", "tools": ["read","write","edit","ls","find","grep"] }
+  }
 }
 ```
 
 Empty `model` = inherit pi default. Used for **pi subprocesses** (Orchestrator / Supervisor / Worker).
 
-**Strict built-in allowlist** for scoped native workers (`read,write,edit,ls,find,grep`). bash/custom tool names are stripped; production tool_call guard blocks bash. Workers launch with `--no-extensions` and only the harness scope-guard extension. Build/test is `executor.verifyCommands` (controller-side).
+**Strict built-in allowlist** for scoped native workers (`read,write,edit,ls,find,grep`). bash/custom tool names are stripped; production tool_call guard blocks bash. Workers launch with `--no-extensions` and only the harness scope-guard extension. Build/test uses the selected verify profile or legacy `executor.verifyCommands` (controller-side).
 
 ## executor（sfh）
 
 ```json
-"executor": {
-  "sfhEnabled": true,
-  "sfhBinary": "sfh",
-  "timeoutSec": 1800,
-  "maxParallel": 4,
+{
+  "executor": {
+    "sfhEnabled": true,
+    "sfhBinary": "sfh",
+    "timeoutSec": 1800,
+    "maxParallel": 4,
 
-  "sfhAllowedTools": ["pi", "opencode"],
+    "sfhAllowedTools": ["pi", "opencode"],
 
-  "sfhModel": "",
-  "sfhEffort": "",
-  "sfhAccess": "read",
+    "sfhModel": "",
+    "sfhEffort": "",
+    "sfhAccess": "read",
 
-  "sfhToolModels":  { "pi": "provider/id", "opencode": "" },
-  "sfhToolEfforts": { "pi": "medium", "codex": "high" },
-  "sfhToolAccess":  { "pi": "read", "opencode": "read" },
+    "sfhToolModels":  { "pi": "provider/id", "opencode": "" },
+    "sfhToolEfforts": { "pi": "medium", "codex": "high" },
+    "sfhToolAccess":  { "pi": "read", "opencode": "read" },
 
-  "sfhIntegrateModel": "",
-  "sfhIntegrateEffort": "",
-  "sfhIntegrateAccess": "read",
+    "sfhIntegrateModel": "",
+    "sfhIntegrateEffort": "",
+    "sfhIntegrateAccess": "read",
 
-  "verifyCommands": [["npm", "test"], ["npx", "tsc", "--noEmit"]],
-  "verifyTimeoutSec": 600
+    "verifyProfiles": {
+      "node": [["npm", "test"], ["npm", "run", "typecheck"]],
+      "rust": [["cargo", "test", "--locked"]]
+    },
+    "verifyProfile": "node",
+    "verifyTimeoutSec": 600
+  }
 }
 ```
 
-### verifyCommands (native done gate)
+### verifyProfiles / verifyProfile (native done gate)
 
 - Argv lists only (`[command, ...args]`); **no shell**. Controller runs them after the Worker with `shell:false`.
 - **Required for native ticket `done`**. Unset / empty / non-zero exit / timeout → done forbidden (`evidence.verify`).
-- Set in **user/base** config. Project may only keep a subset or lower `verifyTimeoutSec` — cannot introduce new commands.
+- Define `verifyProfiles` in **user/base** config after explicit approval.
+- Project config may select an existing `verifyProfile`, keep a subset through legacy `verifyCommands`, or lower `verifyTimeoutSec`; it cannot introduce profiles or argv.
+- `/ml-doctor` shows the effective profile, argv, timeout, and config provenance.
 
 ### Branch field resolution
 
@@ -72,8 +83,9 @@ Integrate step: `sfhIntegrate*` → `sfhModel`/`sfhEffort` → worker.model for 
 
 ### sfhAllowedTools
 
+- Omitted: unrestricted
+- Empty list `[]`: explicit deny-all
 - Non-empty list: Orchestrator/group tickets may only use these tool names; others → ticket **blocked**
-- Empty / omitted: no restriction
 
 ### effort / access notes
 

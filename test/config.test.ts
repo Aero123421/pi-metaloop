@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it } from "node:test";
 import {
 	assertSfhToolAllowed,
@@ -6,6 +9,7 @@ import {
 	captureSfhAccessCeiling,
 	defaultConfig,
 	effectiveNativeWorkerTools,
+	loadConfig,
 	nativeWorkerToolsDenial,
 	resolveMaxTasksCeiling,
 	resolveSfhBranchAccess,
@@ -18,6 +22,21 @@ function executorLayer(ex: Record<string, unknown>): Record<string, unknown> {
 }
 
 describe("role tool ceilings", () => {
+	it("disables meta-loop for an unsupported project config version", () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-meta-loop-config-version-"));
+		const configDir = path.join(cwd, ".pi", "meta-loop");
+		fs.mkdirSync(configDir, { recursive: true });
+		fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ config_version: 999 }));
+		const originalError = console.error;
+		console.error = () => {};
+		try {
+			assert.equal(loadConfig(cwd).enabled, false);
+		} finally {
+			console.error = originalError;
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps omitted project tools at inherited defaults", () => {
 		const cfg = buildConfigFromLayers([], [{ roles: { worker: {} } }]);
 		assert.deepEqual(cfg.roles.worker.tools, defaultConfig.roles.worker.tools);
@@ -91,9 +110,40 @@ describe("role tool ceilings", () => {
 		assert.deepEqual(base.executor.verifyCommands, [["node", "--test"]]);
 		assert.equal(base.executor.verifyTimeoutSec, 120);
 	});
+
+	it("project may select but never define a user-approved verify profile", () => {
+		const selected = buildConfigFromLayers(
+			[executorLayer({ verifyProfiles: { node: [["npm", "test"], ["npm", "run", "typecheck"]] } })],
+			[executorLayer({ verifyProfile: "node" })],
+		);
+		assert.equal(selected.executor.verifyProfile, "node");
+		assert.deepEqual(selected.executor.verifyCommands, [["npm", "test"], ["npm", "run", "typecheck"]]);
+
+		const unknown = buildConfigFromLayers(
+			[executorLayer({ verifyProfiles: { node: [["npm", "test"]] } })],
+			[executorLayer({ verifyProfile: "evil", verifyProfiles: { evil: [["evil", "run"]] } })],
+		);
+		assert.deepEqual(unknown.executor.verifyCommands, []);
+		assert.equal(unknown.executor.verifyProfiles?.evil, undefined);
+	});
 });
 
 describe("sfh tool allowlist", () => {
+	it("keeps the shipped user template unrestricted instead of accidental deny-all", () => {
+		const template = JSON.parse(fs.readFileSync(
+			path.join(process.cwd(), "skills", "meta-loop-setup", "assets", "user-config.template.json"),
+			"utf-8",
+		));
+		const projectTemplate = JSON.parse(fs.readFileSync(
+			path.join(process.cwd(), "skills", "meta-loop-setup", "assets", "project-config.template.json"),
+			"utf-8",
+		));
+		assert.equal(template.executor.sfhAllowedTools, undefined);
+		const cfg = buildConfigFromLayers([template], [projectTemplate]);
+		assert.equal(assertSfhToolAllowed("pi", cfg), null);
+		assert.deepEqual(cfg.executor.verifyCommands, [["npm", "test"], ["npm", "run", "typecheck"]]);
+	});
+
 	it("treats undefined as unrestricted", () => {
 		const cfg = buildConfigFromLayers();
 		assert.equal(cfg.executor.sfhAllowedTools, undefined);
