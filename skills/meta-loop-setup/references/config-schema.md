@@ -139,7 +139,7 @@ Integrate step: `sfhIntegrate*` → `sfhModel`/`sfhEffort` → worker.model for 
 ```
 
 - `maxSupervisions` bounds mid-run Supervisor audits (counting real Supervisor calls). Initial and
-  final audits always run. A project layer may only *raise* it — fewer audits is weaker supervision.
+  final audits always run. Project config cannot change this user-owned cost and supervision policy.
 - `scopeCeiling` bounds every ticket's `allowed_scope`. A ticket whose scope is not provably
   inside it is blocked before running; `**` and a bare `*.ts` are rejected. Unset means no ceiling;
   an **empty** ceiling is deny-all, which is what layer narrowing produces when a project ceiling

@@ -397,9 +397,9 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 				? {
 						maxTasks: Math.min(merged.limits.maxTasks, requested.maxTasks),
 						perTaskOutputCap: Math.min(merged.limits.perTaskOutputCap, requested.perTaskOutputCap),
-						// Fewer audits is weaker supervision, not a narrower capability, so a
-					// project layer may only ask for more.
-					maxSupervisions: Math.max(merged.limits.maxSupervisions, requested.maxSupervisions),
+						// Both directions affect trusted supervision/cost policy. A repository
+						// cannot change the user's audit budget.
+						maxSupervisions: merged.limits.maxSupervisions,
 						// A project may tighten the write surface further, never widen it.
 						scopeCeiling: intersectAllowList(merged.limits.scopeCeiling, requestedCeiling),
 				  }

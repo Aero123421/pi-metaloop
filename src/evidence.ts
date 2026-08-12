@@ -211,12 +211,11 @@ export function collectGitChangedFiles(cwd: string): string[] {
 /**
  * Rules in `allowed_scope` that a harness-level ceiling does not cover.
  *
- * The check is syntactic containment: each requested rule is matched, as if it
- * were a path, against the ceiling rules. That proves containment for the
- * prefix-style ceilings people actually write (`src/**`, `packages/api/**`) and
- * conservatively rejects anything it cannot prove — including the broad forms
- * this is meant to stop, like `**` or a bare `*.ts` that would reach every
- * matching file in the project.
+ * Containment is intentionally conservative. Literal ceilings and literal
+ * prefix ceilings (`src/**`) can safely contain narrower glob rules below the
+ * same path. Other glob ceilings are accepted only on exact equality because
+ * matching the pattern text as if it were a path does not prove language
+ * containment (`src/**` is not contained by `src/*`).
  */
 export function scopeRulesOutsideCeiling(rules: string[], ceiling: string[] | undefined): string[] {
 	// `undefined` is "no ceiling configured". An *empty* ceiling is deny-all, not
@@ -225,11 +224,25 @@ export function scopeRulesOutsideCeiling(rules: string[], ceiling: string[] | un
 	// untrusted layer switch off the control by disagreeing with it.
 	if (ceiling === undefined) return [];
 	if (ceiling.length === 0) return [...rules];
-	const norm = (r: string) => (process.platform === "win32" ? r.toLowerCase() : r);
+	const norm = (rule: string) => {
+		const normalized = toPosix(rule.trim()).replace(/^\.\//, "").replace(/\/+$/, "");
+		return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+	};
+	const hasParentSegment = (rule: string) => rule.split("/").includes("..");
+	const isContained = (requested: string, allowed: string): boolean => {
+		if (!requested || !allowed || hasParentSegment(requested) || hasParentSegment(allowed)) return false;
+		if (requested === allowed) return true;
+
+		const allowedIsPrefix = !allowed.includes("*") && !allowed.includes("?");
+		const allowedIsGlobPrefix = allowed.endsWith("/**") && !/[?*]/.test(allowed.slice(0, -3));
+		if (!allowedIsPrefix && !allowedIsGlobPrefix) return false;
+
+		const prefix = allowedIsGlobPrefix ? allowed.slice(0, -3).replace(/\/$/, "") : allowed;
+		return requested === prefix || requested.startsWith(`${prefix}/`);
+	};
 	return rules.filter((rule) => {
-		const target = norm(toPosix(rule.trim()).replace(/^\.\//, "").replace(/\/+$/, ""));
-		if (!target) return true;
-		return !ceiling.some((allowed) => matchRule(target, target, norm(allowed)));
+		const requested = norm(rule);
+		return !ceiling.some((allowed) => isContained(requested, norm(allowed)));
 	});
 }
 

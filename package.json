@@ -1,6 +1,6 @@
 {
 	"name": "pi-meta-loop",
-	"version": "0.3.0-rc.1",
+	"version": "0.3.0-rc.2",
 	"description": "Adaptive supervised orchestration for pi. Short tasks stay light; long tasks get Orchestrator + Supervisor + Workers/sfh with fail-closed audit and evidence-based completion.",
 	"license": "MIT",
 	"type": "module",

@@ -10,7 +10,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { buildConfigFromLayers } from "../src/config.ts";
 import { checkPath, scopeRulesOutsideCeiling } from "../src/evidence.ts";
-import { finalizeFromEvidence, validateTicket } from "../src/runtime.ts";
+import { applyFinalVerify, canRunSupervisorAudit, finalizeFromEvidence, validateTicket } from "../src/runtime.ts";
 import type { ExecutionEvidence, Ticket, VerifyEvidence, WorkerClaim } from "../src/types.ts";
 
 function ticket(scope = ["src/**"]): Ticket {
@@ -95,7 +95,7 @@ describe("a project layer cannot disarm the write-scope ceiling", () => {
 });
 
 describe("untrusted layers cannot weaken supervision or the evidence sweep", () => {
-	it("a project may raise the audit budget but never lower it", () => {
+	it("a project cannot change the audit budget in either direction", () => {
 		const lowered = buildConfigFromLayers(
 			[{ limits: { maxSupervisions: 12 } }],
 			[{ limits: { maxSupervisions: 1 } }],
@@ -106,7 +106,14 @@ describe("untrusted layers cannot weaken supervision or the evidence sweep", () 
 			[{ limits: { maxSupervisions: 4 } }],
 			[{ limits: { maxSupervisions: 20 } }],
 		);
-		assert.equal(raised.limits.maxSupervisions, 20);
+		assert.equal(raised.limits.maxSupervisions, 4);
+	});
+
+	it("the mid-run budget applies to every re-audit call", () => {
+		assert.equal(canRunSupervisorAudit("mid", 0, 1), true);
+		assert.equal(canRunSupervisorAudit("mid", 1, 1), false);
+		assert.equal(canRunSupervisorAudit("initial", 1, 1), true);
+		assert.equal(canRunSupervisorAudit("final", 1, 1), true);
 	});
 
 	it("a project cannot change evidence bounds in either direction", () => {
@@ -163,6 +170,22 @@ describe("inconclusive outcomes are not progress", () => {
 		finalizeFromEvidence(t, claimDone, evidence({ status: "unset" }), { mode: "final" });
 		assert.equal(t.status, "partial");
 		assert.notEqual(t.evidence?.inconclusive, true);
+	});
+
+	it("marks inconclusive outcomes from the shared final verify", () => {
+		const aborted = ticket();
+		applyFinalVerify(aborted, { status: "aborted", reason: "stopped" });
+		assert.equal(aborted.status, "partial");
+		assert.equal(aborted.evidence?.inconclusive, true);
+
+		const preExisting = ticket();
+		applyFinalVerify(preExisting, {
+			status: "failed",
+			failedCommand: ["npm", "test"],
+			preExisting: true,
+		});
+		assert.equal(preExisting.status, "partial");
+		assert.equal(preExisting.evidence?.inconclusive, true);
 	});
 
 	it("inconclusive never reaches done", () => {

@@ -360,7 +360,7 @@ npm test
 - [x] 0.2.6 — real globstar scope matching, including directory entries for `**/tests/**`
 - [x] 0.2.6 — systemic worker security: no bash on scoped native workers; sfh write/full fail-closed without OS sandbox
 - [x] 0.3.0-rc.1 — verify profiles, `/ml-doctor`, SFH machine envelope, release contract
-- [x] unreleased — evidence attribution, verify baseline + `verifyMode`, `limits.scopeCeiling`,
+- [x] 0.3.0-rc.2 — evidence attribution, verify baseline + `verifyMode`, `limits.scopeCeiling`,
       audit budget, English role prompts
 - [ ] Phase 3 — harness diagnosis (repeated failures → rules/skills/prompts weaknesses)
 - [ ] Phase 4 — evolution loop (logs + scores, external improver) — research-grade, optional

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0-rc.2] - 2026-08-12
+
 ### Fixed
 
 - Filesystem evidence no longer recurses below cwd's parent by default. Scanning three levels
@@ -19,7 +21,7 @@
 - A verify failure that was already failing when the run started is recorded `partial` with
   `verify.preExisting` instead of `failed`, so a repository that began red no longer cascades
   into consecutive-failure stops. This never authorizes `done`.
-- An aborted verify is inconclusive rather than a ticket failure.
+- An aborted verify is inconclusive rather than a ticket failure, including in final verify mode.
 - A final-review `yellow` is recorded as findings. There is no execution loop left after the
   final audit, so revising there produced tickets that could never run.
 - `loadRole` fails closed. A missing `agents/*.md` previously ran a plain coding agent with
@@ -92,9 +94,11 @@
 - An empty `limits.scopeCeiling` is deny-all rather than "no ceiling". Narrowing produces `[]`
   when layers disagree, so the previous reading let an untrusted project layer switch the control
   off by simply disagreeing with it.
-- `limits.maxSupervisions` can only be raised by a project layer. Fewer audits is weaker
-  supervision, not a narrower capability, and lowering it to 1 disabled every mid-run audit
-  including detected scope escapes.
+- Scope-ceiling validation proves rule containment instead of matching the requested glob text as
+  a path; `src/**` can no longer pass through a narrower `src/*` ceiling.
+- Project config cannot change `limits.maxSupervisions` in either direction; both cost and
+  supervision policy remain owned by user config. Required re-audits also consume the same hard
+  upper bound and fail closed when it is exhausted.
 - `evidence.*` is user/base only. Narrowing weakens detection; widening lets an untrusted
   repository force a ten-minute synchronous sweep twice per ticket and pull unrelated sibling
   paths into the Supervisor's prompt.

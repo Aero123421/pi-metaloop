@@ -519,6 +519,33 @@ export function sfhStatusFromResult(
 export const AWAITING_FINAL_VERIFY =
 	"claimed done; controller verify deferred to the end of the run (executor.verifyMode=final)";
 
+/** Apply the one shared final verify verdict to a ticket waiting for promotion. */
+export function applyFinalVerify(ticket: Ticket, verify: VerifyEvidence): void {
+	ticket.evidence = {
+		...(ticket.evidence ?? { processExitCode: 0, actualChangedFiles: [], scopeViolations: [] }),
+		verify,
+	};
+	delete ticket.evidence.inconclusive;
+	if (verifyAllowsDone(verify)) {
+		ticket.status = "done";
+		ticket.error = undefined;
+	} else if (verify.status === "unset") {
+		ticket.status = "partial";
+		ticket.error = "controller trusted verify not configured; done is forbidden without deterministic verify";
+	} else if (verify.status === "aborted") {
+		ticket.status = "partial";
+		ticket.evidence.inconclusive = true;
+		ticket.error = verify.reason ?? "controller trusted verify aborted; done is forbidden";
+	} else if (verify.preExisting) {
+		ticket.status = "partial";
+		ticket.evidence.inconclusive = true;
+		ticket.error = `final controller verify failed on a command that was already failing when the run started (${verify.failedCommand?.join(" ") ?? "unknown"}); not attributed to this ticket`;
+	} else {
+		ticket.status = "failed";
+		ticket.error = verify.reason ?? `final controller verify ${verify.status}; done is forbidden`;
+	}
+}
+
 /** Exported for unit tests of P0 claim/evidence semantics. */
 export function finalizeFromEvidence(
 	ticket: Ticket,
@@ -581,6 +608,11 @@ export function finalizeFromEvidence(
 	if (claim.claimedStatus === "partial") ticket.status = "partial";
 	else if (claim.claimedStatus === "blocked") ticket.status = "blocked";
 	else ticket.status = "partial";
+}
+
+/** Initial/final gates are unbudgeted; every real mid-run call consumes one unit. */
+export function canRunSupervisorAudit(stage: "initial" | "mid" | "final", used: number, maximum: number): boolean {
+	return stage !== "mid" || used < maximum;
 }
 
 function maxAccessLevel(...levels: string[]): string {
@@ -1132,6 +1164,17 @@ export async function runSupervisedTask(
 		let lastVerdict: Verdict | null = null;
 		let requiredReaudit = false;
 		for (let attempt = 0; attempt < 4; attempt++) {
+			if (!canRunSupervisorAudit(stage, supervisions, config.limits.maxSupervisions)) {
+				if (!requiredReaudit) return { action: "continue", verdict: lastVerdict };
+				const error = `blocked: required Supervisor re-audit exceeded limits.maxSupervisions=${config.limits.maxSupervisions}`;
+				for (const t of board.tickets) if (t.status === "pending" || t.status === "running") {
+					t.status = "blocked";
+					t.error = t.error || error;
+				}
+				board.phase = "stopped";
+				notify(hooks, board, `stopped: ${error.slice("blocked: ".length)}`);
+				return { action: "stopped", verdict: lastVerdict };
+			}
 			const reviewReason = requiredReaudit ? `${reason}; required revision re-audit ${attempt}` : reason;
 			const verdict = await runSupervision(stage, reviewReason);
 			if (!verdict) {
@@ -1741,21 +1784,7 @@ export async function runSupervisedTask(
 			verify.preExisting = isPreExistingFailure(verify, verifyBaseline);
 			const promoted = verifyAllowsDone(verify);
 			for (const t of awaiting) {
-				t.evidence = { ...(t.evidence ?? { processExitCode: 0, actualChangedFiles: [], scopeViolations: [] }), verify };
-				if (promoted) {
-					t.status = "done";
-					t.error = undefined;
-				} else if (verify.status === "unset") {
-					t.error =
-						"controller trusted verify not configured; done is forbidden without deterministic verify";
-				} else if (verify.status === "aborted") {
-					t.error = verify.reason ?? "controller trusted verify aborted; done is forbidden";
-				} else if (verify.preExisting) {
-					t.error = `final controller verify failed on a command that was already failing when the run started (${verify.failedCommand?.join(" ") ?? "unknown"}); not attributed to this ticket`;
-				} else {
-					t.status = "failed";
-					t.error = verify.reason ?? `final controller verify ${verify.status}; done is forbidden`;
-				}
+				applyFinalVerify(t, verify);
 			}
 			notify(
 				hooks,

@@ -48,6 +48,14 @@ describe("harness scope ceiling", () => {
 		const ceiling = ["src/**", "test/**"];
 		assert.deepEqual(scopeRulesOutsideCeiling(["src/auth", "src/*.ts", "test/x.test.ts"], ceiling), []);
 		assert.deepEqual(scopeRulesOutsideCeiling(["./src/auth/", "src"], ceiling), []);
+		assert.deepEqual(scopeRulesOutsideCeiling(["src/**", "src/auth/**", "src/?.ts"], ceiling), []);
+	});
+
+	it("does not confuse matching pattern text with glob containment", () => {
+		assert.deepEqual(scopeRulesOutsideCeiling(["src/**"], ["src/*"]), ["src/**"]);
+		assert.deepEqual(scopeRulesOutsideCeiling(["src/*"], ["src/**"]), []);
+		assert.deepEqual(scopeRulesOutsideCeiling(["src/?.ts"], ["src/*.ts"]), ["src/?.ts"]);
+		assert.match(validateTicket(ticket(["src/**"]), ["src/*"]) ?? "", /outside limits\.scopeCeiling/);
 	});
 
 	it("blocks a ticket whose scope escapes the ceiling", () => {

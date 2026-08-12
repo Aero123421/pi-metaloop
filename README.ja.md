@@ -299,7 +299,7 @@ npm test
 - [x] 0.2.6 — globstar scope 判定（`**/tests/**` のディレクトリ自体も許可）
 - [x] 0.2.6 — Worker bash 廃止（built-in のみ）/ sfh write/full は OS sandbox なしで拒否
 - [x] 0.3.0-rc.1 — verify profiles / `/ml-doctor` / SFH machine envelope / 配布契約
-- [x] unreleased — evidence の帰責、verify baseline と `verifyMode`、`limits.scopeCeiling`、
+- [x] 0.3.0-rc.2 — evidence の帰責、verify baseline と `verifyMode`、`limits.scopeCeiling`、
       監査予算、役割プロンプトの英語化
 - [ ] Phase 3 — ハーネス診断（反復障害から rules/skills/prompts の弱点指摘）
 - [ ] Phase 4 — 進化ループ（ログとスコアの蓄積、外側 improver）— 研究寄り、任意

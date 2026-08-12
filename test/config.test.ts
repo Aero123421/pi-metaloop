@@ -208,7 +208,7 @@ describe("project-only narrowing", () => {
 		assert.equal(cfg.executor.maxParallel, 3);
 	});
 
-	it("cannot raise limits but can lower them", () => {
+	it("can narrow task/output limits but cannot change the audit budget", () => {
 		const cfg = buildConfigFromLayers(
 			[{ limits: { maxTasks: 12, perTaskOutputCap: 100_000, maxSupervisions: 9 } }],
 			[
@@ -219,9 +219,7 @@ describe("project-only narrowing", () => {
 		assert.deepEqual(cfg.limits, {
 			maxTasks: 5,
 			perTaskOutputCap: 40_000,
-			// Audits are the exception: fewer is weaker supervision, not a narrower
-			// capability, so a project may only ask for more.
-			maxSupervisions: 40,
+			maxSupervisions: 9,
 			scopeCeiling: undefined,
 		});
 	});
