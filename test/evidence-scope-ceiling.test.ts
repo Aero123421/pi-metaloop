@@ -27,10 +27,12 @@ function ticket(scope: string[]): Ticket {
 }
 
 describe("harness scope ceiling", () => {
-	it("no ceiling keeps today's behavior", () => {
+	it("no ceiling keeps today's behavior; an empty ceiling denies all", () => {
 		assert.deepEqual(scopeRulesOutsideCeiling(["**"], undefined), []);
-		assert.deepEqual(scopeRulesOutsideCeiling(["**"], []), []);
 		assert.equal(validateTicket(ticket(["**"])), null);
+		// [] is what narrowing produces when layers disagree — deny-all, not
+		// unrestricted, so an untrusted layer cannot switch the ceiling off.
+		assert.deepEqual(scopeRulesOutsideCeiling(["**"], []), ["**"]);
 	});
 
 	it("rejects the broad forms a plan can reach for", () => {

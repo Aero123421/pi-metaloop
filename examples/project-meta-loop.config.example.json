@@ -1,14 +1,13 @@
 {
 	"config_version": 1,
-	"_comment": "プロジェクト設定の例。この内容を <プロジェクト>/.pi/meta-loop/config.json に置く。",
-	"roles": {
-		"worker": {
-			"model": ""
-		}
-	},
+	"_comment": "プロジェクト設定の例。<プロジェクト>/.pi/meta-loop/config.json に置く。project 層は能力を狭めることしかできない（役割モデルの選択は user 層の allowProjectModelOverride が必要）。",
 	"executor": {
 		"maxParallel": 3,
 		"verifyProfile": "node",
+		"verifyMode": "per-ticket",
+		"sfhAllowedTools": [
+			"pi"
+		],
 		"sfhToolModels": {
 			"pi": ""
 		}

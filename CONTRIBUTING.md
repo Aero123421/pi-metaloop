@@ -29,7 +29,7 @@ node --experimental-strip-types --test test/runtime.test.ts
 | Controller-side verify gate | `src/verify.ts` |
 | Worker tool-call guard (runs in the child) | `src/scope-guard.ts` |
 | Role prompts | `agents/*.md` |
-| Architecture and known limits | `DESIGN.md` |
+| Architecture and known limits | `DESIGN.md` (`DESIGN.ja.md` for the Japanese version) |
 
 ## House rules
 

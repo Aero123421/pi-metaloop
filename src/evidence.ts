@@ -63,30 +63,59 @@ export function matchRule(relPosix: string, absPosix: string, rule: string): boo
 	return new RegExp(`^${globBody(r)}$`).test(normalizedTarget);
 }
 
+/** Existence test that does not follow the final link, so a dangling symlink counts as present. */
+function lexists(p: string): boolean {
+	try {
+		fs.lstatSync(p);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Guard against symlink cycles while chasing link targets. */
+const SYMLINK_RESOLVE_LIMIT = 32;
+
 /**
- * Resolve path for scope containment.
- * Walks up to the nearest existing ancestor, realpaths it (so symlink/junction
- * ancestors cannot be skipped when deep descendants are still missing), then
- * rejoins the missing tail before the caller decides containment.
+ * Resolve a target to the path a write would actually land on.
+ *
+ * Walks up to the nearest existing ancestor and realpaths it, so a symlinked
+ * ancestor cannot be skipped when deep descendants are still missing.
+ *
+ * A *dangling* symlink needs the same treatment and is easy to miss:
+ * `existsSync` follows the link, so a link whose target does not exist reads as
+ * "missing" and the walk continues past it to the real parent directory — which
+ * makes `src/out.ts -> ../../elsewhere/x` look like it lives under `src/`. The
+ * write tool then follows the link and lands outside. So links are detected with
+ * `lstat` and their targets are resolved explicitly.
  */
+function resolveThroughSymlinks(target: string, depth = 0): string {
+	if (depth > SYMLINK_RESOLVE_LIMIT) return path.normalize(target);
+	const missing: string[] = [];
+	let cursor = target;
+	while (!lexists(cursor)) {
+		const parent = path.dirname(cursor);
+		if (parent === cursor) return path.normalize(target);
+		missing.unshift(path.basename(cursor));
+		cursor = parent;
+	}
+	try {
+		if (fs.lstatSync(cursor).isSymbolicLink()) {
+			const link = fs.readlinkSync(cursor);
+			const linkAbs = path.isAbsolute(link) ? link : path.resolve(path.dirname(cursor), link);
+			return resolveThroughSymlinks(path.join(linkAbs, ...missing), depth + 1);
+		}
+		return path.join(fs.realpathSync(cursor), ...missing);
+	} catch {
+		return path.normalize(target);
+	}
+}
+
 export function resolvePath(filePath: string, cwd: string): { rel: string; abs: string } {
 	const joined = path.isAbsolute(filePath) ? path.normalize(filePath) : path.normalize(path.join(cwd, filePath));
 	let abs = joined;
 	try {
-		// Nearest existing ancestor — not just the leaf or its immediate parent.
-		// Otherwise `src/out` → external with write target `src/out/new/deep/x`
-		// looks lexical-in-scope while the real write follows the symlink.
-		const missing: string[] = [];
-		let cursor = joined;
-		while (!fs.existsSync(cursor)) {
-			const parent = path.dirname(cursor);
-			if (parent === cursor) break;
-			missing.unshift(path.basename(cursor));
-			cursor = parent;
-		}
-		if (fs.existsSync(cursor)) {
-			abs = missing.length === 0 ? fs.realpathSync(cursor) : path.join(fs.realpathSync(cursor), ...missing);
-		}
+		abs = resolveThroughSymlinks(joined);
 	} catch {
 		abs = joined;
 	}
@@ -190,7 +219,12 @@ export function collectGitChangedFiles(cwd: string): string[] {
  * matching file in the project.
  */
 export function scopeRulesOutsideCeiling(rules: string[], ceiling: string[] | undefined): string[] {
-	if (!ceiling?.length) return [];
+	// `undefined` is "no ceiling configured". An *empty* ceiling is deny-all, not
+	// unrestricted: it is what narrowing produces when a project layer's ceiling
+	// does not overlap the user's, and reading that as "no ceiling" would let the
+	// untrusted layer switch off the control by disagreeing with it.
+	if (ceiling === undefined) return [];
+	if (ceiling.length === 0) return [...rules];
 	const norm = (r: string) => (process.platform === "win32" ? r.toLowerCase() : r);
 	return rules.filter((rule) => {
 		const target = norm(toPosix(rule.trim()).replace(/^\.\//, "").replace(/\/+$/, ""));

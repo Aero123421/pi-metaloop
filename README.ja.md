@@ -86,7 +86,7 @@ Supervisor の介入は **常に Orchestrator 経由**（プロンプト挿入�
 | 連続失敗 | 2 で即時 |
 | Worker が blocked（前提不足） | 即時 |
 
-Supervisor への入力: ユーザー要求の原文、Primary との会話ダイジェスト（議論・合意）、タスクボード、実行統計、注入済み guidance 履歴、点検基準。
+初回監査と最終監査での Supervisor への入力: ユーザー要求の原文、Primary との会話ダイジェスト（議論・合意）、フルのタスクボード、実行統計、注入済み guidance 履歴、点検基準。実行中の監査は意図的に軽く、goal と constraints・compact ボード・統計のみを送る。
 
 ## 役割と基準の分離
 
@@ -195,7 +195,7 @@ Native Worker の`done`にはcontroller-side verifyの成功が必須。user con
 { "executor": { "verifyProfile": "node", "verifyTimeoutSec": 600 } }
 ```
 
-Projectから新しいprofileやargvは追加できない。未設定・失敗・timeout時は安全に`partial`となる。`/ml-doctor`で実効profile、argv、timeout、許可元を確認できる。
+Projectから新しいprofileやargvは追加できない。未設定・abort 時は `partial`、実際に走って回帰を報告した失敗・timeout は `failed` になる。いずれの場合も `done` は拒否される。`/ml-doctor`で実効profile、argv、timeout、許可元を確認できる。
 
 その他のキー:
 
@@ -213,7 +213,7 @@ Projectから新しいprofileやargvは追加できない。未設定・失敗�
 - `executor.verifyProfiles` / `verifyProfile` — user承認済みargvとproject選択
 - `executor.verifyMode` — `per-ticket`（標準）/ `final`。`final` は実行ループ後に1回だけ verify し、`done` を主張したチケットをまとめて昇格させる
 - `executor.sfhIntegrateTool` — sfh 統合ステップの tool を明示（未指定ならモデル ID から推測）
-- `evidence.ignoreDirNames` / `parentMaxDepth` / `maxEntries` — evidence スイープの範囲（project 層は**広げる**方向にのみ変更可）
+- `evidence.ignoreDirNames` / `parentMaxDepth` / `maxEntries` / `timeoutMs` — evidence スイープの範囲（user/base 層のみ。project 層は変更できない）
 - `limits.maxTasks` — チケット上限（標準 8）
 - `limits.perTaskOutputCap` — サブプロセスごとの出力上限
 - `limits.maxSupervisions` — 実行中の Supervisor 監査の予算（標準 12。初期/最終監査は常に実行）
@@ -299,6 +299,8 @@ npm test
 - [x] 0.2.6 — globstar scope 判定（`**/tests/**` のディレクトリ自体も許可）
 - [x] 0.2.6 — Worker bash 廃止（built-in のみ）/ sfh write/full は OS sandbox なしで拒否
 - [x] 0.3.0-rc.1 — verify profiles / `/ml-doctor` / SFH machine envelope / 配布契約
+- [x] unreleased — evidence の帰責、verify baseline と `verifyMode`、`limits.scopeCeiling`、
+      監査予算、役割プロンプトの英語化
 - [ ] Phase 3 — ハーネス診断（反復障害から rules/skills/prompts の弱点指摘）
 - [ ] Phase 4 — 進化ループ（ログとスコアの蓄積、外側 improver）— 研究寄り、任意
 

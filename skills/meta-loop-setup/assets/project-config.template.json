@@ -22,7 +22,6 @@
 		"verifyMode": "per-ticket"
 	},
 	"limits": {
-		"maxTasks": 8,
-		"scopeCeiling": ["src/**", "test/**"]
+		"maxTasks": 8
 	}
 }

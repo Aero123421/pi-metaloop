@@ -88,7 +88,7 @@ All Supervisor interventions flow **through the Orchestrator only** (as prompt i
 | Consecutive worker failures | 2 (immediate) |
 | Worker blocked (missing prerequisites) | immediate |
 
-The Supervisor sees: the user's original request, the Primary conversation digest (what was discussed/agreed), the task board, execution stats, injected-guidance history, and the project standards.
+On the initial and final audits the Supervisor sees: the user's original request, the Primary conversation digest (what was discussed/agreed), the full task board, execution stats, injected-guidance history, and the project standards. Mid-run audits are deliberately cheaper — goal and constraints, a compact board, and stats — so a triggered check does not re-send the whole context.
 
 ## Standards: separating role from criteria
 
@@ -217,7 +217,7 @@ Native Worker `done` requires controller-side verify. Define approved argv in us
 { "executor": { "verifyProfile": "node", "verifyTimeoutSec": 600 } }
 ```
 
-Projects cannot introduce profiles or argv. Unset, failed, or timed-out verify safely leaves a ticket `partial`. `/ml-doctor` shows the effective profile, argv, timeout, and provenance.
+Projects cannot introduce profiles or argv. Verify that is unset or aborted leaves a ticket `partial`; verify that ran and reported a regression makes it `failed`. Either way `done` is refused. `/ml-doctor` shows the effective profile, argv, timeout, and provenance.
 
 **When verify runs.** `executor.verifyMode` is `per-ticket` by default: the full sequence runs
 after every native ticket. For a plan whose intermediate tickets cannot leave the tree green on
@@ -244,7 +244,9 @@ never authorizes `done`.
 ```
 
 Any ticket with an entry outside the ceiling is blocked before it runs. Broad forms (`**`, a bare
-`*.ts`) are rejected — containment must be provable. Unset means no ceiling.
+`*.ts`) are rejected — containment must be provable, and the ceiling is passed to the Orchestrator
+so it plans inside it. Unset means no ceiling; an *empty* ceiling denies everything, which is what
+narrowing produces when a project ceiling does not overlap the user's. Set it in user config.
 
 ### Evidence sweep
 
@@ -256,8 +258,8 @@ tooling writing there is not something the ticket did:
 { "evidence": { "ignoreDirNames": ["node_modules", "target"], "parentMaxDepth": 0, "maxEntries": 250000 } }
 ```
 
-A project layer may only *widen* coverage here. The scope guard, not this sweep, is what stops a
-Worker from writing outside its scope.
+User/base layers only — a project layer cannot change these in either direction. The scope guard,
+not this sweep, is what stops a Worker from writing outside its scope.
 
 Other knobs:
 
@@ -358,6 +360,8 @@ npm test
 - [x] 0.2.6 — real globstar scope matching, including directory entries for `**/tests/**`
 - [x] 0.2.6 — systemic worker security: no bash on scoped native workers; sfh write/full fail-closed without OS sandbox
 - [x] 0.3.0-rc.1 — verify profiles, `/ml-doctor`, SFH machine envelope, release contract
+- [x] unreleased — evidence attribution, verify baseline + `verifyMode`, `limits.scopeCeiling`,
+      audit budget, English role prompts
 - [ ] Phase 3 — harness diagnosis (repeated failures → rules/skills/prompts weaknesses)
 - [ ] Phase 4 — evolution loop (logs + scores, external improver) — research-grade, optional
 

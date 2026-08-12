@@ -49,6 +49,9 @@
 		"verifyMode": "per-ticket"
 	},
 	"allowProjectModelOverride": false,
+	"limits": {
+		"scopeCeiling": ["src/**", "test/**"]
+	},
 	"supervisor": {
 		"auto": true,
 		"checkIntervalMinutes": 30,

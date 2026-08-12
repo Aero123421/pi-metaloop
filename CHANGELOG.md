@@ -25,7 +25,12 @@
 - `loadRole` fails closed. A missing `agents/*.md` previously ran a plain coding agent with
   write/edit tools and none of the role's constraints.
 - Losing the owner lock no longer has its `stopped` record overwritten with `running`.
-- Idle sessions stop re-reading and re-parsing the last board roughly 75 times a minute.
+- Idle sessions stop re-reading and re-parsing the last board roughly 75 times a minute, while
+  still painting once on the transition so the last panel does not stay on screen.
+- Exhausting the mid-run audit budget no longer leaves the auto-trigger latched, which turned the
+  execute loop into a busy loop that starved the event loop and blocked the abort signal.
+- `/ml-doctor` distinguishes "sfh not on PATH" from "sfh installed but misbehaving"; both used to
+  report as not installed.
 - Owner-lock heartbeats are throttled to 15s within their 60s lease; two 800ms timers were each
   performing a guarded atomic rewrite.
 - `escalation` settings are validated and clamped like every other config section.
@@ -36,13 +41,16 @@
 - `executor.verifyMode: "final"` runs the trusted verify once after the execute loop and promotes
   the tickets that claimed `done`, for plans whose intermediate tickets cannot leave the tree
   green on their own.
-- A verify baseline is captured before the first ticket and reported to the Supervisor.
+- A verify baseline is captured before the first ticket. The Supervisor's board now carries the
+  verify verdict (`status`, `preExisting`, `baselineStatus`, `inconclusive`), which it was being
+  asked to judge from without ever receiving it.
+- The write-scope ceiling is included in the planning and revision prompts, so the Orchestrator
+  can comply with it instead of discovering it as a blocked ticket.
 - `limits.scopeCeiling` bounds every ticket's `allowed_scope`, so the write surface is no longer
   chosen entirely by model output.
 - `limits.maxSupervisions` bounds mid-run audits; tickets blocked by one root cause now share a
   single audit. Initial and final audits always run.
-- `evidence.*` settings for the sweep's ignore list, parent depth, and caps. Project layers may
-  only widen coverage.
+- `evidence.*` settings for the sweep's ignore list, parent depth, and caps (user/base layers only).
 - `executor.sfhIntegrateTool` sets the integrate step's tool explicitly; inference from a model
   id is now reported on the ticket when it happens.
 - `orchestrate` warns at startup when no trusted verify is configured or when unsupported sfh
@@ -51,6 +59,8 @@
 - Run directories are pruned to the newest 20.
 - `/tasks <ticket-id>` for drill-down; the plain command no longer opens a picker.
 - `npm run docs:check` keeps README.md and README.ja.md from drifting apart.
+- Supervisor `optional_advice`, `risk`, and `harness_suggestions` reach the final summary; they
+  were collected and persisted but shown to nobody.
 
 ### Changed
 
@@ -64,9 +74,34 @@
   remain available so a user can find out why.
 - `limits.concurrency` is removed. It was accepted, clamped, and never read.
 - Tests are covered by `tsc --noEmit`.
+- `DESIGN.md` is English, with the Japanese version kept as `DESIGN.ja.md`; CONTRIBUTING routes
+  contributors to it.
+- `examples/` ships in the package, and both examples were corrected: the project example
+  demonstrated a role model that project layers can no longer set, and the user example defined
+  verify profiles without selecting one — leaving a config where no ticket can reach `done`.
+- The mid-run audit budget counts real Supervisor calls rather than triggers; one trigger could
+  previously spend a whole re-audit cycle against a single unit of budget.
 
 ### Security
 
+- `checkPath` resolves symlinks explicitly, including **dangling** ones. `existsSync` follows the
+  link, so a committed link whose target did not yet exist read as "missing", the walk continued
+  past it to the real parent, and an in-scope-looking write landed wherever the link pointed.
+  Pre-existing; found while verifying that the scope guard actually carries the enforcement
+  weight this release moves onto it.
+- An empty `limits.scopeCeiling` is deny-all rather than "no ceiling". Narrowing produces `[]`
+  when layers disagree, so the previous reading let an untrusted project layer switch the control
+  off by simply disagreeing with it.
+- `limits.maxSupervisions` can only be raised by a project layer. Fewer audits is weaker
+  supervision, not a narrower capability, and lowering it to 1 disabled every mid-run audit
+  including detected scope escapes.
+- `evidence.*` is user/base only. Narrowing weakens detection; widening lets an untrusted
+  repository force a ten-minute synchronous sweep twice per ticket and pull unrelated sibling
+  paths into the Supervisor's prompt.
+- Inconclusive outcomes no longer read as progress. Because `partial` counts as success, the new
+  attribution downgrades were resetting the consecutive-failure counter and skipping trigger
+  evaluation — so a permanently red baseline or a broken snapshot let the harness walk an entire
+  plan without ever raising an audit.
 - SECURITY.md and both READMEs state that approving a verify profile authorizes running the
   target repository's own code: the profile fixes the command, not the payload behind it.
 - README.ja.md's security section reached parity with README.md. It had been three lines and

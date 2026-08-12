@@ -1,7 +1,7 @@
 /**
  * Configuration loader with capability-monotonic project overrides.
  *
- * Layers: default → repo → user → project(folder) → legacy project
+ * Layers: default → repo → user → legacy project → project(folder)
  * Project layer may only NARROW dangerous capabilities, never expand them.
  */
 import * as fs from "node:fs";
@@ -67,11 +67,8 @@ export interface ExecutorSettings {
 }
 
 /**
- * Bounds on the post-hoc filesystem evidence sweep.
- *
- * Project layers may only *widen* coverage (drop ignores, scan deeper, allow
- * more entries) — the inverse of every other setting here, because narrower
- * evidence means weaker detection.
+ * Bounds on the post-hoc filesystem evidence sweep. User/base layers only —
+ * a project layer cannot change these in either direction (see applyLayer).
  */
 export interface EvidenceSettings {
 	/** Directory names recorded but not descended into. */
@@ -400,33 +397,27 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 				? {
 						maxTasks: Math.min(merged.limits.maxTasks, requested.maxTasks),
 						perTaskOutputCap: Math.min(merged.limits.perTaskOutputCap, requested.perTaskOutputCap),
-						maxSupervisions: Math.min(merged.limits.maxSupervisions, requested.maxSupervisions),
+						// Fewer audits is weaker supervision, not a narrower capability, so a
+					// project layer may only ask for more.
+					maxSupervisions: Math.max(merged.limits.maxSupervisions, requested.maxSupervisions),
 						// A project may tighten the write surface further, never widen it.
 						scopeCeiling: intersectAllowList(merged.limits.scopeCeiling, requestedCeiling),
 				  }
 				: { ...requested, scopeCeiling: requestedCeiling ?? merged.limits.scopeCeiling };
 	}
-	if (layer.evidence && typeof layer.evidence === "object") {
+	// Evidence bounds are user/base only. Narrowing them weakens detection, and
+	// widening them is its own problem: the sweep is synchronous, runs twice per
+	// ticket, and its output (paths outside the project) is persisted and sent to
+	// the Supervisor's model. Neither direction is safe to hand an untrusted layer.
+	if (layer.evidence && typeof layer.evidence === "object" && kind !== "project") {
 		const E = layer.evidence as any;
 		const requestedIgnores = Array.isArray(E.ignoreDirNames) ? E.ignoreDirNames.map(String) : undefined;
-		const requested = {
+		merged.evidence = {
 			ignoreDirNames: requestedIgnores ?? merged.evidence.ignoreDirNames,
 			parentMaxDepth: clampInt(E.parentMaxDepth ?? merged.evidence.parentMaxDepth, 0, 8),
 			maxEntries: clampInt(E.maxEntries ?? merged.evidence.maxEntries, 1_000, 5_000_000),
 			timeoutMs: clampInt(E.timeoutMs ?? merged.evidence.timeoutMs, 1_000, 600_000),
 		};
-		merged.evidence =
-			kind === "project"
-				? {
-						// Inverted monotonicity: a project may only widen evidence coverage.
-						ignoreDirNames: requestedIgnores
-							? merged.evidence.ignoreDirNames.filter((d) => requestedIgnores.includes(d))
-							: merged.evidence.ignoreDirNames,
-						parentMaxDepth: Math.max(merged.evidence.parentMaxDepth, requested.parentMaxDepth),
-						maxEntries: Math.max(merged.evidence.maxEntries, requested.maxEntries),
-						timeoutMs: Math.max(merged.evidence.timeoutMs, requested.timeoutMs),
-				  }
-				: requested;
 	}
 	if (layer.supervisor && typeof layer.supervisor === "object") {
 		const s = layer.supervisor as Record<string, unknown>;

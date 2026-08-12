@@ -10,7 +10,7 @@
 	},
 	"homepage": "https://github.com/Aero123421/pi-metaloop#readme",
 	"bugs": "https://github.com/Aero123421/pi-metaloop/issues",
-	"files": ["agents", "config", "examples", "skills", "src", "README.md", "README.ja.md", "DESIGN.md", "CHANGELOG.md", "LICENSE", "SECURITY.md", "SUPPORT.md"],
+	"files": ["agents", "config", "examples", "skills", "src", "README.md", "README.ja.md", "DESIGN.md", "DESIGN.ja.md", "CHANGELOG.md", "LICENSE", "SECURITY.md", "SUPPORT.md"],
 	"publishConfig": {
 		"access": "public"
 	},

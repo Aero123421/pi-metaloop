@@ -73,13 +73,21 @@ sfh --version
 
 `ctx.ui.select` 相当（対話）で:
 
-1. **user のみ** — 全プロジェクト共通の役別モデル・sfh 既定  
-2. **project のみ** — このリポジトリ固有（tool 白リストや基準向き）  
-3. **両方** — user にモデル本命、project に上書き・白リスト・standards  
+1. **user のみ** — 全プロジェクト共通の役別モデル・sfh 既定・verify profile・scopeCeiling  
+2. **project のみ** — このリポジトリ固有（tool 白リスト・profile 選択・基準向き。**モデルは書けない**）  
+3. **両方** — user にモデルと承認済み argv、project に絞り込みと standards  
 
-推奨: **両方**（モデルは user、プロジェクト制約は project）。
+推奨: **両方**。役割モデル・`verifyProfiles`・`limits.scopeCeiling` は user、
+profile の選択と tool 白リストは project。
 
 ### 2. pi 役のモデル（roles）
+
+**役割モデルは user 層にだけ書く。** どのモデルが監督するかは信頼の判断なので、project config
+からの上書きは既定で無視される（`allowProjectModelOverride: false`）。project 層に書いても
+黙って捨てられるため、「project のみ」スコープを選んだ場合はモデルを聞かないこと。
+
+リポジトリ側にモデル選択を委ねたい場合に限り、user config で `allowProjectModelOverride: true`
+を設定する。その意味（そのリポジトリが Supervisor のモデルを選べるようになる）を必ず説明する。
 
 それぞれ `provider/model-id`（pi の `/model` や `--model` と同じ形式）。空 = pi デフォルト継承。
 
@@ -159,7 +167,7 @@ Worker の `done` には controller-side verify の成功が必須。ユーザ�
 
 最後に `/ml-doctor` で、profile、実効argv、timeout、許可元、project narrowing、SFH machine schemaを表示する。
 
-#### 3e. 書き込み範囲の天井（推奨）
+#### 3e. 書き込み範囲の天井（推奨・user 層）
 
 `allowed_scope` は Orchestrator（モデル出力）が決める。`limits.scopeCeiling` を設定すると、
 その外に出るチケットは実行前にブロックされる。
@@ -168,7 +176,9 @@ Worker の `done` には controller-side verify の成功が必須。ユーザ�
 { "limits": { "scopeCeiling": ["src/**", "test/**"] } }
 ```
 
-プロジェクト構成から候補を提示する（`**` や無修飾の `*.ts` は証明できないため拒否される）。
+**user config に書くこと。** project 層の天井は user の天井と交差され、重ならなければ空集合＝
+全拒否になる（fail-closed）。プロジェクト構成から候補を提示する
+（`**` や無修飾の `*.ts` は包含を証明できないため拒否される）。
 
 ### 4. Supervisor / escalation（任意・既定のままでも可）
 

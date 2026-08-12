@@ -43,7 +43,7 @@ export function evaluateTriggers(board: TaskBoard, event: RuntimeEvent, config: 
 /**
  * Automatic hook-style triggers, checked before each ticket starts:
  * - periodic: every `checkIntervalMinutes` since the last review (default 30)
- * - load: `workerStartThreshold` worker starts since the last review (default 4)
+ * - load: `workerStartThreshold` worker starts since the last review (default 6)
  */
 export function checkAutoTriggers(stats: SupervisorStats, config: MetaLoopConfig): TriggerResult {
 	const sup = config.supervisor;

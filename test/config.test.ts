@@ -219,7 +219,9 @@ describe("project-only narrowing", () => {
 		assert.deepEqual(cfg.limits, {
 			maxTasks: 5,
 			perTaskOutputCap: 40_000,
-			maxSupervisions: 3,
+			// Audits are the exception: fewer is weaker supervision, not a narrower
+			// capability, so a project may only ask for more.
+			maxSupervisions: 40,
 			scopeCeiling: undefined,
 		});
 	});

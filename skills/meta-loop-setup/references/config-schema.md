@@ -138,9 +138,12 @@ Integrate step: `sfhIntegrate*` → `sfhModel`/`sfhEffort` → worker.model for 
 }
 ```
 
-- `maxSupervisions` bounds mid-run Supervisor audits. Initial and final audits always run.
+- `maxSupervisions` bounds mid-run Supervisor audits (counting real Supervisor calls). Initial and
+  final audits always run. A project layer may only *raise* it — fewer audits is weaker supervision.
 - `scopeCeiling` bounds every ticket's `allowed_scope`. A ticket whose scope is not provably
-  inside it is blocked before running; `**` and a bare `*.ts` are rejected. Unset means no ceiling.
+  inside it is blocked before running; `**` and a bare `*.ts` are rejected. Unset means no ceiling;
+  an **empty** ceiling is deny-all, which is what layer narrowing produces when a project ceiling
+  does not overlap the user's. Set it in user config.
 
 ## evidence
 
@@ -155,7 +158,9 @@ Integrate step: `sfhIntegrate*` → `sfhModel`/`sfhEffort` → worker.model for 
 
 Bounds the post-run filesystem sweep. Ignored directories are recorded but not traversed, and the
 parent scan defaults to direct entries only — concurrent tooling writing into dependency and build
-trees is not something a ticket did. A project layer may only **widen** coverage here.
+trees is not something a ticket did. **User/base layers only**: narrowing weakens detection, and
+widening lets an untrusted repository force a long synchronous sweep and pull unrelated paths into
+the Supervisor's prompt.
 
 ## allowProjectModelOverride
 

@@ -4,7 +4,7 @@
  * - Background orchestrate; STOP file + /ml-stop + bounded force-stop
  * - Cross-process owner lock (PID/heartbeat/lease) + headless STOP poll
  * - Unified panel; sfh ghost runs filtered
- * - Delta-only scope evidence (no cross-ticket false positives)
+ * - Bounded git + filesystem evidence, attributed to whoever caused it
  */
 import { spawnSync } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -402,6 +402,8 @@ export default function (pi: ExtensionAPI) {
 	let pollTimer: ReturnType<typeof setInterval> | undefined;
 	const sfhLastStates = new Map<string, string>();
 	const watchedSfh = new Map<string, string>();
+	/** Set once the poller has painted the transition into idle, so it can then stop. */
+	let idlePainted = false;
 
 	const stopPollers = () => {
 		if (pollTimer) {
@@ -447,6 +449,7 @@ export default function (pi: ExtensionAPI) {
 		stopPollers();
 		sfhLastStates.clear();
 		watchedSfh.clear();
+		idlePainted = false;
 		// Briefly show last outcome on session start, then auto-hide if terminal
 		panelForceUntil = Date.now() + 8_000;
 		paint(ctx, { force: true });
@@ -456,9 +459,17 @@ export default function (pi: ExtensionAPI) {
 				// Idle sessions must cost nothing. Without this the poller re-read and
 				// re-parsed the last run's board.json ~75 times a minute forever, which
 				// is exactly the overhead this extension promises short tasks won't pay.
+				// The first idle tick still paints once: nothing else repaints on a timer,
+				// so skipping it immediately would strand the last panel on screen.
 				if (!active && watchedSfh.size === 0 && Date.now() >= panelForceUntil) {
-					if (activeRuns(ctx.cwd).length === 0) return;
+					if (activeRuns(ctx.cwd).length === 0) {
+						if (idlePainted) return;
+						idlePainted = true;
+						paint(ctx);
+						return;
+					}
 				}
+				idlePainted = false;
 				checkCooperativeStop();
 				// Owner-lock heartbeat each poll tick while a run is live.
 				refreshActiveOwnership(active);
@@ -669,6 +680,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Headless-safe heartbeat + STOP poll (UI poller may be absent).
 		lastHeartbeatAt = 0;
+		idlePainted = false;
 		const runPulse = setInterval(() => {
 			if (!active || active.runId !== runId) return;
 			const owned = refreshActiveOwnership(active);
@@ -1135,9 +1147,11 @@ export default function (pi: ExtensionAPI) {
 			const commands = verify.commands.length
 				? verify.commands.map((argv) => `  - ${JSON.stringify(argv)}`)
 				: ["  - (none; native done will remain partial)"];
-			// sfh is only needed for group tickets, so its absence is information,
-			// not a problem with this installation.
-			const sfhInstalled = sfh.errorCode !== "SFH_PREFLIGHT_INVALID";
+			// sfh is only needed for group tickets, so its absence is information, not
+			// a problem. Distinguish "not on PATH" from "installed but misbehaving":
+			// both used to surface as SFH_PREFLIGHT_INVALID and print "not installed".
+			const sfhMissing = /ENOENT|not found|No such file/i.test(sfh.errorMessage ?? "");
+			const sfhInstalled = !(sfh.errorCode === "SFH_PREFLIGHT_INVALID" && sfhMissing);
 			const healthy = cfg.enabled && verify.donePossible && problems.length === 0;
 			ctx.ui.notify(
 				[
@@ -1155,7 +1169,9 @@ export default function (pi: ExtensionAPI) {
 					"",
 					`scope ceiling: ${cfg.limits.scopeCeiling?.join(", ") || "(none; plans choose their own write scope)"}`,
 					`project model override: ${cfg.allowProjectModelOverride ? "ALLOWED" : "blocked"}`,
-					`evidence: parentDepth=${cfg.evidence.parentMaxDepth} maxEntries=${cfg.evidence.maxEntries} ignored=${cfg.evidence.ignoreDirNames.length} dirs`,
+					`mid-run audit budget: ${cfg.limits.maxSupervisions}`,
+					`evidence: parentDepth=${cfg.evidence.parentMaxDepth} maxEntries=${cfg.evidence.maxEntries} timeout=${cfg.evidence.timeoutMs}ms ignored=${cfg.evidence.ignoreDirNames.length} dirs`,
+					`sfh integrate tool: ${cfg.executor.sfhIntegrateTool?.trim() || "(inferred from model id)"}`,
 					unsupportedAccess.length
 						? `sfh access WARNING: ${unsupportedAccess.join(", ")} — write/full is refused without an OS sandbox`
 						: "",
