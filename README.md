@@ -15,12 +15,12 @@ Short tasks stay lightweight. Long tasks can use a supervised layer (Orchestrato
 - **Asymmetric activation** — questions, git checks, discussion, small fixes: zero overhead, no extra agents.
 - **Early alignment check** — before workers really start, the Supervisor audits the plan once. Work-design review, not code review.
 - **Separated authority** — exactly one owner of user intent (the Primary agent), one owner of the execution plan, one detector of anomalies.
-- **Externalized metacognition** — monitoring and control are harness-level, not delegated to the model's self-reflection.
+- **Externalized metacognition** — judgment runs in a separate model; the binding constraints (triggers, evidence, verify, fail-closed parsing) are deterministic and harness-level.
 
 ## Requirements
 
 - [pi](https://github.com/earendil-works/pi) (this is a pi extension)
-- **[sfh (SimpleFlowHarness)](https://github.com/Aero123421/SimpleFlowHarness) — required dependency** for group tickets (`execution: "sfh"`), which run parallel branch groups with an integration contract
+- **[sfh (SimpleFlowHarness)](https://github.com/Aero123421/SimpleFlowHarness) — optional**, and needed only for group tickets (`execution: "sfh"`), which run parallel branch groups with an integration contract. Everything else works without it.
 
 ```bash
 # Windows PowerShell
@@ -29,13 +29,13 @@ irm https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.sh | sh
 ```
 
-Without sfh, group tickets are blocked with install instructions; normal (native) tickets still work.
+Without sfh, group tickets are blocked with install instructions and everything else runs normally. `/ml-doctor` reports a missing sfh as information, not a problem.
 
 | Dependency | Supported contract |
 |---|---|
 | Node.js | `>=22.19.0` |
 | pi / pi-ai | `^0.83.0` |
-| SFH | `>=1.4.0`, machine schema `1` (`sfh run/preflight --json`) |
+| SFH (optional) | `>=1.4.0`, machine schema `1` (`sfh run/preflight --json`) |
 
 ## How it works
 
@@ -88,7 +88,7 @@ All Supervisor interventions flow **through the Orchestrator only** (as prompt i
 | Consecutive worker failures | 2 (immediate) |
 | Worker blocked (missing prerequisites) | immediate |
 
-The Supervisor sees: the user's original request, the Primary conversation digest (what was discussed/agreed), the task board, execution stats, injected-guidance history, and the project standards.
+On the initial and final audits the Supervisor sees: the user's original request, the Primary conversation digest (what was discussed/agreed), the full task board, execution stats, injected-guidance history, and the project standards. Mid-run audits are deliberately cheaper — goal and constraints, a compact board, and stats — so a triggered check does not re-send the whole context.
 
 ## Standards: separating role from criteria
 
@@ -119,6 +119,18 @@ Quick test without installing:
 ```bash
 pi -e /path/to/pi-meta-loop/src/index.ts
 ```
+
+### Do this first
+
+Out of the box there is **no trusted verify configured**, and without one no ticket can reach
+`done` — every run ends `incomplete` by design. Set a verify profile before your first real run:
+
+```text
+/skill:meta-loop-setup     # interactive; writes the config for you
+/ml-doctor                 # shows the effective gate, argv, and provenance
+```
+
+`orchestrate` warns at startup when the gate is missing, so you find out before spending a run.
 
 ### First-time project setup (skill)
 
@@ -205,7 +217,49 @@ Native Worker `done` requires controller-side verify. Define approved argv in us
 { "executor": { "verifyProfile": "node", "verifyTimeoutSec": 600 } }
 ```
 
-Projects cannot introduce profiles or argv. Unset, failed, or timed-out verify safely leaves a ticket `partial`. `/ml-doctor` shows the effective profile, argv, timeout, and provenance.
+Projects cannot introduce profiles or argv. Verify that is unset or aborted leaves a ticket `partial`; verify that ran and reported a regression makes it `failed`. Either way `done` is refused. `/ml-doctor` shows the effective profile, argv, timeout, and provenance.
+
+**When verify runs.** `executor.verifyMode` is `per-ticket` by default: the full sequence runs
+after every native ticket. For a plan whose intermediate tickets cannot leave the tree green on
+their own — the normal case for a decomposed change — use `final`:
+
+```json
+{ "executor": { "verifyMode": "final" } }
+```
+
+Tickets that claim `done` wait as `partial`, one verify runs after the execute loop, and they are
+promoted together if it passes.
+
+**Baseline.** Verify also runs once *before* the first ticket. If a command was already failing
+then, a ticket that fails the same command is recorded `partial` with `verify.preExisting`
+rather than `failed`, so a repository that started red does not cascade into a stopped run. This
+never authorizes `done`.
+
+### Write-scope ceiling
+
+`allowed_scope` comes from the Orchestrator's plan. `limits.scopeCeiling` bounds it:
+
+```json
+{ "limits": { "scopeCeiling": ["src/**", "test/**"] } }
+```
+
+Any ticket with an entry outside the ceiling is blocked before it runs. Broad forms (`**`, a bare
+`*.ts`) are rejected — containment must be provable, and the ceiling is passed to the Orchestrator
+so it plans inside it. Unset means no ceiling; an *empty* ceiling denies everything, which is what
+narrowing produces when a project ceiling does not overlap the user's. Set it in user config.
+
+### Evidence sweep
+
+After each ticket the harness diffs git plus a bounded filesystem snapshot. Defaults skip
+dependency, build, and cache trees and do not recurse into sibling projects, because concurrent
+tooling writing there is not something the ticket did:
+
+```json
+{ "evidence": { "ignoreDirNames": ["node_modules", "target"], "parentMaxDepth": 0, "maxEntries": 250000 } }
+```
+
+User/base layers only — a project layer cannot change these in either direction. The scope guard,
+not this sweep, is what stops a Worker from writing outside its scope.
 
 Other knobs:
 
@@ -222,6 +276,10 @@ Other knobs:
 - `escalation.promptLengthThreshold` — default 400
 - `limits.maxTasks` — ticket cap (default 8)
 - `limits.perTaskOutputCap` — output cap per subprocess
+- `limits.maxSupervisions` — mid-run Supervisor audit budget (default 12; initial/final always run)
+- `limits.scopeCeiling` — harness ceiling on ticket `allowed_scope`
+- `allowProjectModelOverride` — let project config choose role models (default false)
+- `executor.sfhIntegrateTool` — explicit sfh integrate tool instead of inferring one from the model id
 
 ## Group tickets (parallel branches + integration contract)
 
@@ -276,11 +334,14 @@ npm test
 
 - Orchestrator / Supervisor / Worker default tools include **no bash**.
 - Worker tools are a **strict built-in allowlist** (`read`/`write`/`edit`/`ls`/`find`/`grep`). Native workers start with `--no-extensions -e scope-guard` so project/user extensions cannot override tools. `allowed_scope` is enforced on write/edit **and** checked after run via git + filesystem evidence. bash/custom tools from alias/args/config are stripped and bash is blocked at the tool_call gate.
-- Build/test is **controller-side trusted deterministic verify** (`executor.verifyCommands` argv lists, no shell). Unset, failed, or timed-out verify **forbids** native `done` (recorded on `evidence.verify`).
-- sfh parallel groups are **read-only review** without an OS sandbox. `write`/`full` is refused at plan/execute (not marked done via post-hoc evidence alone).
-- Project config may only **narrow** capabilities relative to user/defaults (cannot raise sfh access, swap sfhBinary, or expand tool allow-lists past the user ceiling).
+- Build/test is **controller-side deterministic verify** (`verifyProfiles` argv lists, no shell). Unset, failed, or timed-out verify **forbids** native `done` (recorded on `evidence.verify`).
+- **A verify profile authorizes running the target repository's own code.** `["npm","test"]` executes whatever that repository's `package.json` and test files define. The profile system fixes the *command*, not the payload behind it. Keep profiles to repositories you would run tests in by hand, and prefer selecting them per project (`executor.verifyProfile`) over a global `verifyCommands`.
+- `limits.scopeCeiling` bounds every ticket's `allowed_scope`. Without it the write surface is chosen entirely by the Orchestrator's plan.
+- sfh parallel groups are **read-only review** without an OS sandbox. `write`/`full` is refused at plan/execute (not marked done via post-hoc evidence alone), and reported at startup and by `/ml-doctor`.
+- Project config may only **narrow** capabilities relative to user/defaults: it cannot raise sfh access, swap sfhBinary, expand tool allow-lists, introduce verify argv, or **choose role models** (opt in with `allowProjectModelOverride`).
 - Project `standards.md` is treated as **untrusted criteria data** in prompts.
 - Generated flows under `.pi/meta-loop/flows/` may contain user text — gitignore them; do not commit secrets.
+- Run directories hold prompts and model output. They are pruned to the newest 20.
 
 **Nesting guard:** child processes set `PI_META_LOOP_DEPTH >= 1` so this extension registers nothing on the normal path. This prevents accidental re-orchestration; it is **not** a hostile security boundary if a process can clear env and spawn arbitrary binaries (Worker has no bash by default).
 
@@ -299,6 +360,8 @@ npm test
 - [x] 0.2.6 — real globstar scope matching, including directory entries for `**/tests/**`
 - [x] 0.2.6 — systemic worker security: no bash on scoped native workers; sfh write/full fail-closed without OS sandbox
 - [x] 0.3.0-rc.1 — verify profiles, `/ml-doctor`, SFH machine envelope, release contract
+- [x] 0.3.0-rc.2 — evidence attribution, verify baseline + `verifyMode`, `limits.scopeCeiling`,
+      audit budget, English role prompts
 - [ ] Phase 3 — harness diagnosis (repeated failures → rules/skills/prompts weaknesses)
 - [ ] Phase 4 — evolution loop (logs + scores, external improver) — research-grade, optional
 

@@ -45,7 +45,12 @@
 			"rust": [["cargo", "test", "--locked"], ["cargo", "clippy", "--locked", "--", "-D", "warnings"]],
 			"python": [["python", "-m", "pytest"]]
 		},
-		"verifyTimeoutSec": 600
+		"verifyTimeoutSec": 600,
+		"verifyMode": "per-ticket"
+	},
+	"allowProjectModelOverride": false,
+	"limits": {
+		"scopeCeiling": ["src/**", "test/**"]
 	},
 	"supervisor": {
 		"auto": true,

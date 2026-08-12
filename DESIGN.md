@@ -1,64 +1,134 @@
-# DESIGN — pi-meta-loop (0.3.0-rc.1)
+# DESIGN — pi-meta-loop
 
-## 正体
+日本語版は [DESIGN.ja.md](./DESIGN.ja.md)。
 
-長期タスク向けの **fail-closed 監督ハーネス（α）**。  
-モデルの自己申告だけでなく、ハーネスが evidence（exit / git dirty / scope）を見る。
+## What this is
 
-## 権限（能力境界）
+A **fail-closed supervision harness** for long tasks. Instead of taking the model's word for it,
+the harness looks at evidence: process exit, git state, filesystem state, and a controller-side
+verify it runs itself.
 
-| 役 | デフォルト tools |
+The judgment is still a model call — the Supervisor. What is deterministic is everything around
+it: trigger conditions, fail-closed JSON parsing, evidence collection, the verify gate, and the
+capability boundaries.
+
+## Capability boundaries
+
+| Role | Default tools |
 |----|------------------|
-| Orchestrator | read, ls, find, grep（**bash なし**） |
-| Supervisor | read, ls, find, grep（**bash なし**） |
-| Worker | read, write, edit, ls, find, grep（**bash なし**・intercept 可能な built-in のみ） |
-| sfh group | **read-only review**（OS sandbox なしでは write/full を実行・done にしない） |
+| Orchestrator | read, ls, find, grep (**no bash**) |
+| Supervisor | read, ls, find, grep (**no bash**) |
+| Worker | read, write, edit, ls, find, grep (**no bash**; interceptable built-ins only) |
+| sfh group | **read-only review** (write/full is refused without an OS sandbox) |
 
-Project config は user/default の能力を**狭めるだけ**（sfhBinary 変更・access 引き上げ・allowlist 拡大は不可）。
-Native Worker の effective tools は `WORKER_TOOLS` 厳密 allowlist 交差。`--no-extensions` + scope-guard のみロード。tool_call guard も bash を無条件拒否。
-ビルド/テストは `executor.verifyCommands` による controller 側 trusted deterministic verify（未設定・失敗・timeout 時は done 禁止）。
-User/baseは承認済みargvを`verifyProfiles`として定義でき、projectは既存`verifyProfile`を選ぶだけ。未知profileはdeny-all。
+- A project layer may only **narrow** what user/default config grants. It cannot change
+  `sfhBinary`, raise access, expand tool allowlists, introduce verify argv, or **choose role
+  models** (unless user config sets `allowProjectModelOverride`). Evidence bounds are user-only in
+  both directions.
+- A native Worker's effective tools are the strict intersection with `WORKER_TOOLS`. It launches
+  with `--no-extensions` plus the scope guard only, and the `tool_call` guard refuses bash
+  unconditionally.
+- With `limits.scopeCeiling` set, a ticket's `allowed_scope` must be **provably** inside it (`**`
+  and a bare `*.ts` are rejected). Unset, the write surface is chosen by the plan — model output.
+- Scope enforcement happens at tool-call time in the guard. `checkPath` resolves symlinks
+  explicitly, including dangling ones, so a link inside the scope cannot redirect a write outside
+  it.
 
-## 監査
+## Completion
 
-- Supervisor には **フル ticket JSON**（acceptance / scope / branches / claim / evidence）
-- 初回 audit は **fail-closed**（不正 JSON / 非0 exit → 実行しない）
-- blocked / out-of-scope は即時 re-audit
-- Primary への tool `content` は `buildPrimarySummary`（変更ファイル・tests・未解決を含む）
+`WorkerClaim` (self-report) and `ExecutionEvidence` (exit + git + filesystem + controller verify)
+are kept separate; the harness decides the final status. A native `done` requires
+`verify.status === "passed"`.
 
-## 完了判定
+### Attribution
 
-WorkerClaim（自己申告）と ExecutionEvidence（exit + git + scope + controller verify）を分離し、ハーネスが最終 status を決める。native `done` は verify.passed 必須。
+`failed` means **the ticket's own execution is at fault**. Everything below is `partial` with
+`evidence.inconclusive` — never `done`, but not charged to the ticket either:
 
-## 設定
+- a pre- or post-run snapshot could not complete (coverage limit, timeout)
+- HEAD or the index moved during a shell-less native Worker's run (external interference)
+- verify was aborted
+- verify failed on a command that was **already failing in the run-start baseline**
+  (`verify.preExisting`)
 
-`default → repo → user → legacy project → folder project`  
-folder が legacy に勝つ。standards は優先度高い層を cap 内で優先保持。
+Without this distinction the consecutive-failure trigger misfires and stops a run that never went
+wrong. Inconclusive is also not progress: it does not reset the failure counter, and a dependent
+ticket does not treat it as a satisfied prerequisite.
 
-## UX / 実行モデル（0.2.1–0.2.2）
+A scope violation or a non-zero exit is always the ticket's own problem, whatever else went wrong
+at the same time.
 
-- **TUI では orchestrate はデフォルト background** — tool は即 return、チャット継続可
-- 完了時 `meta-loop-result` を `sendMessage({ followUp, triggerTurn })` で注入
-- 停止: `/ml-stop`（AbortController）
-- 状態: footer + **widget（belowEditor）** + `/tasks` `/ml-runs`
-- board 永続化: `.pi/meta-loop/runs/<runId>/board.json` + `latest.json`
-- 役サブプロセスの task は **stdin**（argv に載せない → Windows ENAMETOOLONG 回避）
-- **終了セマンティクス（0.2.2）**: `plan_failed` / 全 blocked → `incomplete` or `error`（偽の `done` にしない）
-- plan は最大2回・outputCap≥200k、raw を `plan-attempt-*.txt` に保存
-- widget の elapsed は `finishedAt` で固定
-- **0.2.3 TUI**: meta-loop と sfh を同一 belowEditor パネルに統合（色バッジ・進捗バー・ticket 一覧・スピナー）。`/ml-ui` で detail 切替。終了後 ~90s で auto-hide
-- **0.2.4**: scope は **ticket delta のみ**（前チケットの dirty を違反にしない）。sfh パネルは live/直近45s のみ。停止は `/ml-stop`・`runs/<id>/STOP`・`force=true`。integrate access は branch の max に昇格、codex model なら tool=codex
-- **0.2.5**: mid-review compact board；verdictHistory 永続化；Orchestrator は短いスライス計画；`/tasks` ドリルダウン；user config で sfh full 天井（project の full が効く）
-- **0.2.6**: allowed_scope の globstar (`crates/**/tests/**`) を正しく解釈。末尾ディレクトリ自体と子ファイルを同じ規則で許可し、security test directory の偽 scope violation を防止
-- **0.3.0-rc.1**: `/ml-doctor`、config/board schema version、SFH `preflight/run --json` schema-v1契約、run ID直接保存、配布契約を追加
+### When verify runs
 
-## 既知の限界（α）
+- `executor.verifyMode: "per-ticket"` (default) — full sequence after each native ticket.
+- `executor.verifyMode: "final"` — once after the execute loop, promoting the tickets that
+  claimed `done`. For plans whose intermediate tickets cannot leave the tree green alone.
+- A baseline runs once before the first ticket and is included in the Supervisor's evidence view
+  as `verify.baselineStatus`.
 
-- bash 個別 denylist は収束しないため、scoped native Worker では bash 自体を付与しない（built-in + scope + evidence）
-- sfh write/full は OS sandbox なしでは scope を保証できないため拒否（read-only review のみ）
-- background 中に Primary が同じ tree を編集すると Worker と衝突しうる（ユーザー判断）
-- チケット実行中の壁時計 Supervisor は未実装（チケット境界）
-- nesting guard は協調的経路向け
-- role/SFH subprocessはprovider credentialsのためhost environmentを継承する（値はdoctor/logに出さない）
-- クラッシュ後の run は session_start で `stopped` に落とす（自動再開なし）
-- project config は access/tools を**広げられない**（user 層で ceiling を上げる）
+## Auditing
+
+- Initial and final audits get the **full ticket JSON** (acceptance / scope / branches / claim /
+  evidence, including the verify verdict). Mid-run audits get a **compact board** and no
+  standards section, deliberately, to keep a triggered check cheap.
+- The initial audit is **fail-closed**: invalid JSON or a non-zero exit means execution does not
+  start.
+- blocked / out-of-scope triggers an immediate re-audit, but tickets blocked by one root cause
+  share a single audit.
+- Mid-run audits are bounded by `limits.maxSupervisions`, counting real Supervisor calls. Initial
+  and final audits are never budgeted. When the budget runs out the trigger state is still
+  cleared — otherwise the auto-trigger latches and the execute loop spins.
+- **A final yellow does not revise.** The execute loop is over, so any pending ticket a revision
+  produced could never run; it is recorded as findings instead. `red` still stops.
+- The tool `content` returned to the Primary is `buildPrimarySummary` (changed files, tests,
+  unresolved, Supervisor advice).
+
+## Evidence sweep
+
+`.git` has its own control-plane snapshot. The filesystem snapshot covers:
+
+- cwd, recursively, skipping `evidence.ignoreDirNames` (those directories are **recorded** so
+  their creation and deletion stay visible, but not descended into)
+- cwd's parent, **direct entries only** by default (`evidence.parentMaxDepth`)
+
+Dependency, build, and cache trees and sibling projects are left out because writes there are not
+the ticket's doing — attributing them produced violations no Worker caused. Real enforcement is
+the scope guard at tool-call time; this sweep is a detection backstop.
+
+## Configuration
+
+`default → repo → user → legacy project → project folder`. The folder form wins over the legacy
+one. Standards prefer higher-priority layers within the size cap. A layer that fails to load
+disables meta-loop and the reason is reported by `/ml-doctor`.
+
+## UX / execution model
+
+- **In the TUI, `orchestrate` runs in the background by default** — the tool returns immediately
+  and the chat stays usable.
+- On completion a `meta-loop-result` message is injected via `sendMessage({ followUp, triggerTurn })`.
+- Startup warns when verify is unconfigured or unsupported sfh access is set; the run still proceeds.
+- Stopping: `/ml-stop` (AbortController), a `STOP` file, or `force`.
+- State: footer + `belowEditor` widget + `/tasks` and `/ml-runs`. `/tasks <ticket-id>` for detail.
+- Board persistence: `.pi/meta-loop/runs/<runId>/board.json` + `latest.json`, newest 20 retained.
+- Role subprocess tasks go on **stdin**, never argv (avoids Windows `ENAMETOOLONG`).
+- Terminal semantics: `plan_failed` / all-blocked → `incomplete` or `error`, never a false `done`.
+- Planning retries at most twice with `outputCap >= 200k`; raw attempts land in `plan-attempt-*.txt`.
+- Idle sessions stop re-reading the board. Owner-lock heartbeat is 15s against a 60s lease.
+
+## Known limitations
+
+- Per-command bash denylists do not converge, so a scoped native Worker gets no bash at all
+  (built-ins + scope + evidence instead).
+- sfh write/full cannot have its scope enforced without an OS sandbox, so it is refused;
+  read-only review only.
+- sfh group completion is `exit 0` + non-empty stdout. `integration.acceptance` is **not**
+  verified — asymmetric with native completion, and an accepted trade-off for investigation work.
+- Approving a verify profile authorizes running the target repository's own code (see SECURITY.md).
+- Without `limits.scopeCeiling`, the write surface is decided by model output.
+- If the Primary edits the same files during a background run, Worker and Primary can still
+  conflict. Narrowing the evidence sweep removed the false positives, not this real overlap.
+- There is no wall-clock Supervisor inside a running ticket; supervision happens at ticket boundaries.
+- The nesting guard is for cooperative paths, not hostile ones.
+- Role and SFH subprocesses inherit the host environment because model CLIs need provider
+  credentials. Values are never printed by the doctor or logs.
+- After a crash, `session_start` marks the run `stopped`. There is no automatic resume.

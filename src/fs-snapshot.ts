@@ -17,7 +17,10 @@ export interface FilesystemSnapshotLimits {
 	maxEntries: number;
 	/** Maximum recursion below cwd. Reaching a deeper entry fails closed. */
 	cwdMaxDepth: number;
-	/** Neighbourhood depth below cwd's parent (cwd itself is scanned separately). */
+	/**
+	 * Neighbourhood depth below cwd's parent (cwd itself is scanned separately).
+	 * `0` records the parent's direct entries without descending into siblings.
+	 */
 	parentMaxDepth: number;
 	/** Maximum synchronous snapshot wall time. */
 	timeoutMs: number;
@@ -25,15 +28,55 @@ export interface FilesystemSnapshotLimits {
 	hashFileMaxBytes: number;
 	/** Bounded total content bytes hashed; metadata remains for later files. */
 	maxHashBytes: number;
+	/**
+	 * Directory names recorded but not descended into. These are dependency,
+	 * build, and tool-cache trees that concurrent processes (package managers,
+	 * language servers, dev servers, watchers) rewrite constantly, so scanning
+	 * them produces scope violations that no Worker caused — and they dominate
+	 * the entry budget. Creation/deletion of the directory itself stays visible.
+	 * Worker writes into them are still refused by the scope guard at tool-call
+	 * time; this only bounds the post-hoc evidence sweep.
+	 */
+	ignoreDirNames: readonly string[];
 }
+
+/** Dependency/build/cache trees excluded from the evidence sweep by default. */
+export const DEFAULT_EVIDENCE_IGNORE_DIRS = [
+	".cache",
+	".gradle",
+	".idea",
+	".mypy_cache",
+	".next",
+	".nuxt",
+	".parcel-cache",
+	".pytest_cache",
+	".ruff_cache",
+	".sfh",
+	".svelte-kit",
+	".terraform",
+	".tox",
+	".turbo",
+	".venv",
+	".vscode",
+	"__pycache__",
+	"bower_components",
+	"coverage",
+	"node_modules",
+	"target",
+	"venv",
+	"vendor",
+] as const;
 
 export const DEFAULT_FILESYSTEM_SNAPSHOT_LIMITS: FilesystemSnapshotLimits = {
 	maxEntries: 250_000,
 	cwdMaxDepth: 64,
-	parentMaxDepth: 3,
+	// Direct parent entries only. Recursing into siblings made unrelated
+	// repositories part of every ticket's evidence and blew the entry budget.
+	parentMaxDepth: 0,
 	timeoutMs: 30_000,
 	hashFileMaxBytes: 256 * 1024,
 	maxHashBytes: 32 * 1_048_576,
+	ignoreDirNames: DEFAULT_EVIDENCE_IGNORE_DIRS,
 };
 
 export type FilesystemEntryKind = "file" | "directory" | "symlink" | "other";
@@ -162,12 +205,18 @@ function ownerLockSemanticHash(raw: Buffer): string | undefined {
  * covered by `captureGitSnapshot` (and `.git` is always reserved in checkPath).
  * Read-only git commands may refresh implementation-detail metadata under `.git`
  * that must not create false filesystem diffs.
+ *
+ * `limits.ignoreDirNames` trees are recorded but not descended into, and the
+ * parent scan defaults to direct entries only. Both bound the sweep to paths a
+ * ticket plausibly owns; the scope guard, not this sweep, is what actually stops
+ * a Worker from writing outside its scope.
  */
 export function captureFilesystemSnapshot(
 	cwd: string,
 	overrides: Partial<FilesystemSnapshotLimits> = {},
 ): FilesystemSnapshot {
 	const limits = { ...DEFAULT_FILESYSTEM_SNAPSHOT_LIMITS, ...overrides };
+	const ignoredDirs = new Set(limits.ignoreDirNames);
 	const started = Date.now();
 	const cwdReal = canonicalExisting(cwd);
 	const parentReal = canonicalExisting(path.dirname(cwdReal));
@@ -247,6 +296,9 @@ export function captureFilesystemSnapshot(
 					fail(`filesystem snapshot cannot stat/read ${abs}: ${e instanceof Error ? e.message : String(e)}`);
 				}
 				if (!st || !st.isDirectory() || st.isSymbolicLink()) continue;
+				// Recorded above, so the directory appearing or disappearing stays
+				// observable; only its churning contents are left out.
+				if (ignoredDirs.has(child.name)) continue;
 				if (current.depth >= maxDepth) {
 					if (opts.hardDepthLimit) {
 						fail(`filesystem snapshot cwd depth limit (${maxDepth}) exceeded at ${abs}`);
@@ -264,8 +316,8 @@ export function captureFilesystemSnapshot(
 		const rootStat = fs.lstatSync(cwdReal);
 		if (!rootStat.isDirectory()) fail(`filesystem snapshot cwd is not a directory: ${cwdReal}`);
 		scanDirectory(cwdReal, limits.cwdMaxDepth, { hardDepthLimit: true });
-		// Include direct parent files and a realistic bounded sibling neighbourhood.
-		// This detects `../file`, sibling writes, and interpreter/redirection bypasses.
+		// Direct parent entries detect `../file` writes. Descending further would
+		// make unrelated sibling projects part of every ticket's evidence.
 		scanDirectory(parentReal, limits.parentMaxDepth, {
 			skipCwdSubtree: true,
 			hardDepthLimit: false,

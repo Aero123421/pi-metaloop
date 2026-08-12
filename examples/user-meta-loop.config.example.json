@@ -1,6 +1,7 @@
 {
 	"config_version": 1,
-	"_comment": "ユーザー全体設定の例。この内容を ~/.pi/agent/meta-loop/config.json に置く。",
+	"_comment": "ユーザー全体設定の例。~/.pi/agent/meta-loop/config.json に置く。verifyProfile を選ばないと native チケットは done にならない。",
+	"allowProjectModelOverride": false,
 	"roles": {
 		"orchestrator": {
 			"model": "qwen-token-plan/qwen3.8-max-preview"
@@ -19,6 +20,7 @@
 		"maxParallel": 4,
 		"sfhModel": "",
 		"sfhIntegrateModel": "",
+		"sfhIntegrateTool": "",
 		"sfhToolModels": {
 			"pi": "qwen-token-plan/qwen3.8-max-preview",
 			"opencode": "",
@@ -26,9 +28,27 @@
 			"claude": ""
 		},
 		"verifyProfiles": {
-			"node": [["npm", "test"], ["npm", "run", "typecheck"]],
-			"rust": [["cargo", "test", "--locked"]]
+			"node": [
+				[
+					"npm",
+					"test"
+				],
+				[
+					"npm",
+					"run",
+					"typecheck"
+				]
+			],
+			"rust": [
+				[
+					"cargo",
+					"test",
+					"--locked"
+				]
+			]
 		},
+		"verifyProfile": "node",
+		"verifyMode": "per-ticket",
 		"verifyTimeoutSec": 600
 	},
 	"supervisor": {
@@ -36,5 +56,13 @@
 		"checkIntervalMinutes": 30,
 		"workerStartThreshold": 6,
 		"maxConsecutiveFailures": 2
+	},
+	"limits": {
+		"maxTasks": 8,
+		"maxSupervisions": 12,
+		"scopeCeiling": [
+			"src/**",
+			"test/**"
+		]
 	}
 }

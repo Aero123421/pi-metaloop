@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { TaskBoard, Verdict } from "./types.ts";
+import type { TaskBoard, UsageStats, Verdict } from "./types.ts";
 
 export type RunStatus = "running" | "done" | "error" | "stopped" | "incomplete";
 export const BOARD_SCHEMA_VERSION = 1;
@@ -28,6 +28,8 @@ export interface PersistedRun {
 	error?: string;
 	/** Short live activity (worker progress tail) */
 	activity?: string;
+	/** Aggregated role-subprocess spend, when the runtime reported any. */
+	usage?: UsageStats;
 }
 
 export interface OwnerLockHolder {
@@ -183,6 +185,54 @@ export function clearStopRequest(cwd: string, runId: string): void {
 	} catch {
 		/* */
 	}
+}
+
+/**
+ * Drop the oldest finished run directories, newest `keep` retained.
+ *
+ * Run artifacts contain prompts, paths, and model output, and nothing removed
+ * them: a long-lived project accumulated every run it had ever executed. The
+ * live run and the latest pointer are never pruned.
+ */
+export function pruneRuns(cwd: string, keep: number): string[] {
+	if (!Number.isFinite(keep) || keep < 1) return [];
+	const root = runsRoot(cwd);
+	const entries: Array<{ name: string; updatedAt: string; protectedRun: boolean }> = [];
+	try {
+		const latest = readLatestRun(cwd)?.runId;
+		const holder = readOwnerLock(cwd);
+		for (const name of fs.readdirSync(root)) {
+			if (!isValidRunId(name)) continue;
+			try {
+				if (!fs.statSync(path.join(root, name)).isDirectory()) continue;
+			} catch {
+				continue;
+			}
+			const run = readRun(cwd, name);
+			// An unreadable board still has a directory worth ageing out; sort it oldest.
+			entries.push({
+				name,
+				updatedAt: run?.updatedAt ?? "",
+				protectedRun: name === latest || name === holder?.runId,
+			});
+		}
+	} catch {
+		return [];
+	}
+	entries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
+	const removed: string[] = [];
+	// Newest `keep` survive; the live run and the latest pointer always survive.
+	for (const entry of entries.slice(keep).filter((e) => !e.protectedRun)) {
+		try {
+			const dir = assertRunIdContained(cwd, entry.name);
+			assertNotSymlink(dir);
+			fs.rmSync(dir, { recursive: true, force: true });
+			removed.push(entry.name);
+		} catch {
+			/* leave anything that does not resolve to a plain directory inside runs/ */
+		}
+	}
+	return removed;
 }
 
 function runsRoot(cwd: string): string {

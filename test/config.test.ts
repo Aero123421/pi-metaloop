@@ -208,19 +208,39 @@ describe("project-only narrowing", () => {
 		assert.equal(cfg.executor.maxParallel, 3);
 	});
 
-	it("cannot raise limits but can lower them", () => {
+	it("can narrow task/output limits but cannot change the audit budget", () => {
 		const cfg = buildConfigFromLayers(
-			[{ limits: { maxTasks: 12, concurrency: 6, perTaskOutputCap: 100_000 } }],
+			[{ limits: { maxTasks: 12, perTaskOutputCap: 100_000, maxSupervisions: 9 } }],
 			[
-				{ limits: { maxTasks: 20, concurrency: 8, perTaskOutputCap: 200_000 } },
-				{ limits: { maxTasks: 5, concurrency: 2, perTaskOutputCap: 40_000 } },
+				{ limits: { maxTasks: 20, perTaskOutputCap: 200_000, maxSupervisions: 40 } },
+				{ limits: { maxTasks: 5, perTaskOutputCap: 40_000, maxSupervisions: 3 } },
 			],
 		);
 		assert.deepEqual(cfg.limits, {
 			maxTasks: 5,
-			concurrency: 2,
 			perTaskOutputCap: 40_000,
+			maxSupervisions: 9,
+			scopeCeiling: undefined,
 		});
+	});
+
+	it("project may tighten but never widen the scope ceiling", () => {
+		const widened = buildConfigFromLayers(
+			[{ limits: { scopeCeiling: ["src/**"] } }],
+			[{ limits: { scopeCeiling: ["src/**", "infra/**"] } }],
+		);
+		assert.deepEqual(widened.limits.scopeCeiling, ["src/**"]);
+
+		const tightened = buildConfigFromLayers(
+			[{ limits: { scopeCeiling: ["src/**", "test/**"] } }],
+			[{ limits: { scopeCeiling: ["src/**"] } }],
+		);
+		assert.deepEqual(tightened.limits.scopeCeiling, ["src/**"]);
+
+		// Introducing a ceiling where none existed only restricts the write surface,
+		// so a project is allowed to do it.
+		const introduced = buildConfigFromLayers([], [{ limits: { scopeCeiling: ["src/**"] } }]);
+		assert.deepEqual(introduced.limits.scopeCeiling, ["src/**"]);
 	});
 
 	it("cannot re-enable or raise supervisor settings but can lower them", () => {

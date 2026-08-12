@@ -18,7 +18,8 @@
 			"opencode": ""
 		},
 		"sfhIntegrateAccess": "read",
-		"verifyProfile": "node"
+		"verifyProfile": "node",
+		"verifyMode": "per-ticket"
 	},
 	"limits": {
 		"maxTasks": 8

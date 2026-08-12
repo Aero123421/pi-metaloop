@@ -23,7 +23,7 @@ it("matches the installed SFH schema-v1 run envelope", async (t) => {
 
 	try {
 		const preflight = runSfhPreflight("sfh", flow, cwd);
-		assert.equal(preflight.ok, true, preflight.errorMessage);
+		assert.equal(preflight.ok, true, preflight.errorMessage ?? "preflight failed");
 		assert.equal(preflight.schemaVersion, 1);
 
 		const result = await runSfhFlow({ binary: "sfh", flowFile: flow, cwd, wallClockSec: 30 });

@@ -1,10 +1,10 @@
 /**
- * pi-meta-loop extension entry (0.2.6-alpha).
+ * pi-meta-loop extension entry.
  *
  * - Background orchestrate; STOP file + /ml-stop + bounded force-stop
  * - Cross-process owner lock (PID/heartbeat/lease) + headless STOP poll
  * - Unified panel; sfh ghost runs filtered
- * - Delta-only scope evidence (no cross-ticket false positives)
+ * - Bounded git + filesystem evidence, attributed to whoever caused it
  */
 import { spawnSync } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -19,6 +19,7 @@ import {
 	readLatestRun,
 	readOwnerLock,
 	readRun,
+	pruneRuns,
 	requestStop,
 	runStatusFromPhase,
 	isOwnerLockStale,
@@ -27,7 +28,13 @@ import {
 	type OwnerLockHolder,
 	type PersistedRun,
 } from "./board-store.ts";
-import { getVerifyDiagnostics, loadConfig, resolveMaxTasksCeiling } from "./config.ts";
+import {
+	getConfigProblems,
+	getVerifyDiagnostics,
+	loadConfig,
+	resolveMaxTasksCeiling,
+	unsupportedSfhAccessSettings,
+} from "./config.ts";
 import {
 	createEscalationStats,
 	escalationMessage,
@@ -63,6 +70,10 @@ const SFH_STATUS_KEY = "sfh";
 const POLL_MS = 800;
 /** abortActive must return even if the run promise hangs (e.g. stuck child). */
 const ABORT_WAIT_MS = 20_000;
+/** Owner-lock heartbeat cadence. Comfortably inside the 60s lease. */
+const HEARTBEAT_INTERVAL_MS = 15_000;
+/** Run directories kept under .pi/meta-loop/runs before the oldest are pruned. */
+const KEEP_RUNS = 20;
 
 interface ActiveOrchestration {
 	runId: string;
@@ -274,9 +285,21 @@ export default function (pi: ExtensionAPI) {
 	const canUseOriginSession = (run: ActiveOrchestration): boolean =>
 		run.allowSessionDelivery && !shuttingDown && run.originSessionGeneration === sessionGeneration;
 
-	/** Heartbeat owner lock; abort the live run when generation is missing/mismatched. */
-	const refreshActiveOwnership = (run: ActiveOrchestration | null = active): boolean => {
+	/**
+	 * Heartbeat owner lock; abort the live run when generation is missing/mismatched.
+	 *
+	 * Throttled well inside the lease: the UI poller and the headless run pulse both
+	 * call this every 800ms, and each real refresh is a guarded atomic rewrite with
+	 * two fsyncs. The panel needs 800ms; the lock does not.
+	 */
+	let lastHeartbeatAt = 0;
+	const refreshActiveOwnership = (
+		run: ActiveOrchestration | null = active,
+		opts?: { force?: boolean },
+	): boolean => {
 		if (!run?.lock) return true;
+		if (!opts?.force && Date.now() - lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) return true;
+		lastHeartbeatAt = Date.now();
 		let owned = true;
 		try {
 			owned = run.lock.refresh();
@@ -312,7 +335,12 @@ export default function (pi: ExtensionAPI) {
 	const persistActive = (patch: Partial<PersistedRun> = {}) => {
 		if (!active?.board) return;
 		// Heartbeat while work is live (also covers headless paths without UI poller).
-		refreshActiveOwnership(active);
+		// On ownership loss it already persisted a `stopped` record; writing our
+		// `running` snapshot over it would resurrect a run this process no longer owns.
+		if (!refreshActiveOwnership(active)) {
+			if (canUseOriginSession(active)) paint();
+			return;
+		}
 		const run: PersistedRun = {
 			runId: active.runId,
 			cwd: active.cwd,
@@ -336,7 +364,8 @@ export default function (pi: ExtensionAPI) {
 
 	// ---------- soft escalation ----------
 	pi.on("tool_call", async (event, ctx) => {
-		const cfg = loadConfig(ctx.cwd);
+		// Hot path: this fires on every Primary tool call.
+		const cfg = loadConfig(ctx.cwd, { cache: true });
 		if (!cfg.enabled || active) return;
 		noteToolCall(escStats, event.toolName, (event.input ?? {}) as Record<string, unknown>);
 		if (!shouldSuggestEscalation(escStats, cfg.escalation)) return;
@@ -349,7 +378,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		const cfg = loadConfig(ctx.cwd);
+		const cfg = loadConfig(ctx.cwd, { cache: true });
 		if (!cfg.enabled || active || escStats.suggested) return;
 		if (!cfg.escalation.enabled) return;
 		const longPrompt = promptLooksLong(event.prompt ?? "", cfg.escalation.promptLengthThreshold);
@@ -373,6 +402,8 @@ export default function (pi: ExtensionAPI) {
 	let pollTimer: ReturnType<typeof setInterval> | undefined;
 	const sfhLastStates = new Map<string, string>();
 	const watchedSfh = new Map<string, string>();
+	/** Set once the poller has painted the transition into idle, so it can then stop. */
+	let idlePainted = false;
 
 	const stopPollers = () => {
 		if (pollTimer) {
@@ -418,12 +449,27 @@ export default function (pi: ExtensionAPI) {
 		stopPollers();
 		sfhLastStates.clear();
 		watchedSfh.clear();
+		idlePainted = false;
 		// Briefly show last outcome on session start, then auto-hide if terminal
 		panelForceUntil = Date.now() + 8_000;
 		paint(ctx, { force: true });
 
 		pollTimer = setInterval(() => {
 			try {
+				// Idle sessions must cost nothing. Without this the poller re-read and
+				// re-parsed the last run's board.json ~75 times a minute forever, which
+				// is exactly the overhead this extension promises short tasks won't pay.
+				// The first idle tick still paints once: nothing else repaints on a timer,
+				// so skipping it immediately would strand the last panel on screen.
+				if (!active && watchedSfh.size === 0 && Date.now() >= panelForceUntil) {
+					if (activeRuns(ctx.cwd).length === 0) {
+						if (idlePainted) return;
+						idlePainted = true;
+						paint(ctx);
+						return;
+					}
+				}
+				idlePainted = false;
 				checkCooperativeStop();
 				// Owner-lock heartbeat each poll tick while a run is live.
 				refreshActiveOwnership(active);
@@ -455,6 +501,16 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		stopPollers();
+		if (active && sessionUi?.hasUI) {
+			try {
+				sessionUi.ui.notify(
+					`Stopping supervised run ${active.runId} before exit (up to ${Math.round(ABORT_WAIT_MS / 1000)}s)…`,
+					"info",
+				);
+			} catch {
+				/* UI may already be tearing down */
+			}
+		}
 		// session_shutdown handlers are awaited by pi. Invalidate session-bound API
 		// use first. A bounded wait may return before work settles, but ownership and
 		// active state then remain until work's finally completes.
@@ -507,9 +563,34 @@ export default function (pi: ExtensionAPI) {
 				].join("\n"),
 			);
 		}
-		// Tool input may narrow the configured cap, never raise it.
+		// Tool input may narrow the configured cap, never raise it. Replace rather
+		// than mutate: a cached config instance must never be edited in place.
 		if (params.max_tasks != null) {
-			config.limits.maxTasks = resolveMaxTasksCeiling(config.limits.maxTasks, params.max_tasks);
+			config.limits = {
+				...config.limits,
+				maxTasks: resolveMaxTasksCeiling(config.limits.maxTasks, params.max_tasks),
+			};
+		}
+
+		// Say up front what this run can and cannot conclude. Without a trusted
+		// verify gate no ticket can reach `done`, and discovering that only after
+		// planning, auditing and running every Worker is a needlessly expensive
+		// way to learn it.
+		const startupNotes: string[] = [];
+		const verifyStatus = getVerifyDiagnostics(ctx.cwd, config);
+		if (!verifyStatus.donePossible) {
+			startupNotes.push(
+				`No trusted verify configured (${verifyStatus.problem ?? "unset"}). Native tickets can reach 'partial' at best; run /skill:meta-loop-setup or /ml-doctor to set a verify profile.`,
+			);
+		}
+		const unsupportedAccess = unsupportedSfhAccessSettings(config);
+		if (unsupportedAccess.length > 0) {
+			startupNotes.push(
+				`sfh write/full access is configured (${unsupportedAccess.join(", ")}) but unsupported without an OS sandbox; group tickets using it will be refused.`,
+			);
+		}
+		if (startupNotes.length > 0 && ctx.hasUI) {
+			ctx.ui.notify(["[pi-meta-loop] before starting:", ...startupNotes.map((n) => `- ${n}`)].join("\n"), "warning");
 		}
 
 		const runId = createRunId();
@@ -598,6 +679,8 @@ export default function (pi: ExtensionAPI) {
 		sessionUi = ctx;
 
 		// Headless-safe heartbeat + STOP poll (UI poller may be absent).
+		lastHeartbeatAt = 0;
+		idlePainted = false;
 		const runPulse = setInterval(() => {
 			if (!active || active.runId !== runId) return;
 			const owned = refreshActiveOwnership(active);
@@ -675,6 +758,7 @@ export default function (pi: ExtensionAPI) {
 					board: result.board,
 					verdicts: result.verdicts,
 					summary: result.summary,
+					usage: result.usage,
 					error:
 						terminal === "done" || terminal === "stopped"
 							? undefined
@@ -683,6 +767,8 @@ export default function (pi: ExtensionAPI) {
 								: `phase=${result.board.phase} done=${counts.done}/${counts.total}`,
 				};
 				writeRun(ctx.cwd, finished);
+				// Run directories hold prompts and model output and nothing pruned them.
+				pruneRuns(ctx.cwd, KEEP_RUNS);
 
 				if (canUseOriginSession(orch) && sessionUi?.hasUI) {
 					sessionUi.ui.notify(
@@ -873,7 +959,12 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
+	// The kill switch should also remove the tool: leaving it registered lets the
+	// model spend a turn calling something that can only answer "disabled".
+	// Commands stay registered either way — /ml-doctor is how a user finds out
+	// *why* meta-loop is disabled, so it must survive the disabled path.
+	if (loadConfig(process.cwd(), { cache: true }).enabled) {
+		pi.registerTool({
 		name: "orchestrate",
 		label: "Supervised Task",
 		description: [
@@ -915,11 +1006,13 @@ export default function (pi: ExtensionAPI) {
 				ctx,
 			);
 		},
-	});
+		});
+	}
 
 	pi.registerCommand("tasks", {
-		description: "Task board summary; optional ticket drill-down",
-		handler: async (_args, ctx) => {
+		description: "Task board summary (/tasks <ticket-id> or /tasks detail for one ticket)",
+		handler: async (args, ctx) => {
+			const arg = args.trim().toLowerCase();
 			if (!loadConfig(ctx.cwd).enabled) {
 				ctx.ui.notify("pi-meta-loop is disabled", "info");
 				return;
@@ -952,42 +1045,62 @@ export default function (pi: ExtensionAPI) {
 			});
 
 			// Overview first
-			ctx.ui.notify([...header, "", ...ticketLines, active ? "" : "", active ? "Stop: /ml-stop" : ""].filter(Boolean).join("\n"), "info");
+			ctx.ui.notify(
+				[
+					...header,
+					"",
+					...ticketLines,
+					"",
+					board.tickets.length > 0 ? "Detail: /tasks <ticket-id>" : "",
+					active ? "Stop: /ml-stop" : "",
+				]
+					.filter(Boolean)
+					.join("\n"),
+				"info",
+			);
 
-			// Optional drill-down (interactive)
-			if (board.tickets.length > 0 && ctx.hasUI) {
-				const items = [
-					"(close)",
-					...board.tickets.map(
-						(t) => `${ticketIcon(t.status)} ${t.id} [${t.status}] ${t.goal.slice(0, 40)}`,
-					),
-				];
-				const choice = await ctx.ui.select("Ticket detail (or close):", items);
-				if (choice && choice !== "(close)") {
-					const idx = items.indexOf(choice) - 1;
-					const t = board.tickets[idx];
-					if (t) {
-						ctx.ui.notify(
-							[
-								`### ${t.id} [${t.status}]`,
-								t.goal,
-								`exec: ${t.execution ?? "native"}`,
-								`deps: ${(t.dependencies || []).join(", ") || "—"}`,
-								`scope: ${(t.allowed_scope || []).slice(0, 6).join(", ")}`,
-								`acceptance: ${(t.acceptance || []).slice(0, 4).join(" | ")}`,
-								t.error ? `error: ${t.error.slice(0, 400)}` : "",
-								t.evidence?.scopeViolations?.length
-									? `scopeViolations: ${t.evidence.scopeViolations.slice(0, 4).join("; ")}`
-									: "",
-								t.evidence?.actualChangedFiles?.length
-									? `changed: ${t.evidence.actualChangedFiles.slice(0, 8).join(", ")}`
-									: "",
-							]
-								.filter(Boolean)
-								.join("\n"),
-							"info",
-						);
-					}
+			// Drill-down is opt-in: checking the board is the frequent action, and
+			// making it open a modal picker every time taxes the common case.
+			const wantsDetail = arg.length > 0;
+			if (wantsDetail && board.tickets.length > 0 && ctx.hasUI) {
+				const named = board.tickets.find((t) => t.id.toLowerCase() === arg);
+				let t = named;
+				if (!t) {
+					const items = board.tickets.map(
+						(x) => `${ticketIcon(x.status)} ${x.id} [${x.status}] ${x.goal.slice(0, 40)}`,
+					);
+					const choice = await ctx.ui.select("Ticket detail:", items);
+					t = choice ? board.tickets[items.indexOf(choice)] : undefined;
+				}
+				if (!t) {
+					ctx.ui.notify(`No ticket matching "${arg}"`, "warning");
+				} else {
+					const verify = t.evidence?.verify;
+					ctx.ui.notify(
+						[
+							`### ${t.id} [${t.status}]`,
+							t.goal,
+							`exec: ${t.execution ?? "native"}`,
+							`deps: ${(t.dependencies || []).join(", ") || "—"}`,
+							`scope: ${(t.allowed_scope || []).slice(0, 6).join(", ")}`,
+							`acceptance: ${(t.acceptance || []).slice(0, 4).join(" | ")}`,
+							verify
+								? `verify: ${verify.status}${verify.preExisting ? " (pre-existing failure, not attributed)" : ""}${
+										verify.baselineStatus ? ` [baseline: ${verify.baselineStatus}]` : ""
+									}`
+								: "",
+							t.error ? `error: ${t.error.slice(0, 400)}` : "",
+							t.evidence?.scopeViolations?.length
+								? `scopeViolations: ${t.evidence.scopeViolations.slice(0, 4).join("; ")}`
+								: "",
+							t.evidence?.actualChangedFiles?.length
+								? `changed: ${t.evidence.actualChangedFiles.slice(0, 8).join(", ")}`
+								: "",
+						]
+							.filter(Boolean)
+							.join("\n"),
+						"info",
+					);
 				}
 			}
 
@@ -1027,15 +1140,25 @@ export default function (pi: ExtensionAPI) {
 		description: "Show effective verify gate and SFH machine-contract diagnostics",
 			handler: async (_args, ctx) => {
 			const cfg = loadConfig(ctx.cwd);
+			const problems = getConfigProblems(ctx.cwd);
 			const verify = getVerifyDiagnostics(ctx.cwd, cfg);
 			const sfh = runSfhPreflight(cfg.executor.sfhBinary || "sfh", undefined, ctx.cwd);
+			const unsupportedAccess = unsupportedSfhAccessSettings(cfg);
 			const commands = verify.commands.length
 				? verify.commands.map((argv) => `  - ${JSON.stringify(argv)}`)
 				: ["  - (none; native done will remain partial)"];
+			// sfh is only needed for group tickets, so its absence is information, not
+			// a problem. Distinguish "not on PATH" from "installed but misbehaving":
+			// both used to surface as SFH_PREFLIGHT_INVALID and print "not installed".
+			const sfhMissing = /ENOENT|not found|No such file/i.test(sfh.errorMessage ?? "");
+			const sfhInstalled = !(sfh.errorCode === "SFH_PREFLIGHT_INVALID" && sfhMissing);
+			const healthy = cfg.enabled && verify.donePossible && problems.length === 0;
 			ctx.ui.notify(
 				[
-					`meta-loop: ${cfg.enabled ? "ENABLED" : "DISABLED (check config errors)"}`,
+					`meta-loop: ${cfg.enabled ? "ENABLED" : "DISABLED"}`,
+					...problems.map((p) => `  config error: ${p.file}: ${p.message}`),
 					`native done: ${verify.donePossible ? "READY" : "BLOCKED"}`,
+					`verify mode: ${cfg.executor.verifyMode ?? "per-ticket"}`,
 					`verify profile: ${verify.profile || "(direct/none)"}`,
 					`allowed by: ${verify.allowedBy}`,
 					`project narrowing: ${verify.narrowedBy.join(", ") || "none"}`,
@@ -1044,11 +1167,26 @@ export default function (pi: ExtensionAPI) {
 					"verify argv:",
 					...commands,
 					"",
-					`sfh machine schema: ${sfh.schemaVersion === 1 ? "v1 compatible" : "UNSUPPORTED"}`,
-					`sfh version: ${sfh.sfhVersion || "unknown"}`,
-					`sfh preflight: ${sfh.ok ? "ready" : [sfh.errorCode, sfh.errorMessage].filter(Boolean).join(": ") || "failed"}`,
-				].join("\n"),
-				cfg.enabled && verify.donePossible && sfh.schemaVersion === 1 ? "info" : "warning",
+					`scope ceiling: ${cfg.limits.scopeCeiling?.join(", ") || "(none; plans choose their own write scope)"}`,
+					`project model override: ${cfg.allowProjectModelOverride ? "ALLOWED" : "blocked"}`,
+					`mid-run audit budget: ${cfg.limits.maxSupervisions}`,
+					`evidence: parentDepth=${cfg.evidence.parentMaxDepth} maxEntries=${cfg.evidence.maxEntries} timeout=${cfg.evidence.timeoutMs}ms ignored=${cfg.evidence.ignoreDirNames.length} dirs`,
+					`sfh integrate tool: ${cfg.executor.sfhIntegrateTool?.trim() || "(inferred from model id)"}`,
+					unsupportedAccess.length
+						? `sfh access WARNING: ${unsupportedAccess.join(", ")} — write/full is refused without an OS sandbox`
+						: "",
+					"",
+					sfhInstalled
+						? `sfh machine schema: ${sfh.schemaVersion === 1 ? "v1 compatible" : "UNSUPPORTED"}`
+						: "sfh: not installed (optional; only group tickets need it)",
+					sfhInstalled ? `sfh version: ${sfh.sfhVersion || "unknown"}` : "",
+					sfhInstalled
+						? `sfh preflight: ${sfh.ok ? "ready" : [sfh.errorCode, sfh.errorMessage].filter(Boolean).join(": ") || "failed"}`
+						: "",
+				]
+					.filter(Boolean)
+					.join("\n"),
+				healthy ? "info" : "warning",
 			);
 		},
 	});

@@ -13,12 +13,12 @@
 - **非対称起動** — 質問・git 確認・議論・小修正はオーバーヘッドゼロ、追加エージェントなし
 - **早期アラインメント監査** — Worker 本格稼働の前に Supervisor が計画を一度監査（コードレビューではなく作業設計のレビュー）
 - **権限分離** — ユーザー意図の所有者は常に Primary 一つ。計画の所有者・異常の検出者も分離
-- **外付けメタ認知** — 監視と制御はハーネス側で行う。モデルの自己反省には頼らない
+- **外付けメタ認知** — 判定は別モデルが行い、拘束（トリガ・evidence・verify・fail-closed パース）はハーネス側の決定論的な処理が担う
 
 ## 前提（必須依存）
 
 - [pi](https://github.com/earendil-works/pi)（この拡張の本体）
-- **[sfh (SimpleFlowHarness)](https://github.com/Aero123421/SimpleFlowHarness) — 必須依存**。グループチケット（`execution: "sfh"`）の実行に使う
+- **[sfh (SimpleFlowHarness)](https://github.com/Aero123421/SimpleFlowHarness) — 任意**。グループチケット（`execution: "sfh"`）にのみ必要で、それ以外は無くても動く
 
 ```bash
 # Windows PowerShell
@@ -27,13 +27,13 @@ irm https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.sh | sh
 ```
 
-sfh 未インストールの場合、グループチケットはインストール手順付きのエラーでブロックされる（通常チケットはそのまま動く）。
+sfh 未インストールの場合、グループチケットはインストール手順付きのエラーでブロックされ、それ以外は通常どおり動く。`/ml-doctor` は sfh 未導入を「問題」ではなく情報として表示する。
 
 | 依存 | 対応範囲 |
 |---|---|
 | Node.js | `>=22.19.0` |
 | pi / pi-ai | `^0.83.0` |
-| SFH | `>=1.4.0`、machine schema `1`（`sfh run/preflight --json`） |
+| SFH（任意） | `>=1.4.0`、machine schema `1`（`sfh run/preflight --json`） |
 
 ## 動作
 
@@ -86,7 +86,7 @@ Supervisor の介入は **常に Orchestrator 経由**（プロンプト挿入�
 | 連続失敗 | 2 で即時 |
 | Worker が blocked（前提不足） | 即時 |
 
-Supervisor への入力: ユーザー要求の原文、Primary との会話ダイジェスト（議論・合意）、タスクボード、実行統計、注入済み guidance 履歴、点検基準。
+初回監査と最終監査での Supervisor への入力: ユーザー要求の原文、Primary との会話ダイジェスト（議論・合意）、フルのタスクボード、実行統計、注入済み guidance 履歴、点検基準。実行中の監査は意図的に軽く、goal と constraints・compact ボード・統計のみを送る。
 
 ## 役割と基準の分離
 
@@ -104,6 +104,17 @@ pi install /path/to/pi-meta-loop
 ```
 
 または `~/.pi/agent/settings.json` の `extensions` にパスを追加。
+
+### 最初にやること
+
+初期状態では **trusted verify が未設定**で、その状態ではどのチケットも `done` に到達できない（設計上、run は必ず `incomplete` で終わる）。最初の実運用の前に verify profile を設定すること:
+
+```text
+/skill:meta-loop-setup     # 対話で config を書き出す
+/ml-doctor                 # 実効ゲート・argv・許可元を表示
+```
+
+`orchestrate` は起動時にゲート未設定を警告するので、1 run 使い切る前に気づける。
 
 ### 初回セットアップ（skill・明示呼び出し）
 
@@ -184,7 +195,7 @@ Native Worker の`done`にはcontroller-side verifyの成功が必須。user con
 { "executor": { "verifyProfile": "node", "verifyTimeoutSec": 600 } }
 ```
 
-Projectから新しいprofileやargvは追加できない。未設定・失敗・timeout時は安全に`partial`となる。`/ml-doctor`で実効profile、argv、timeout、許可元を確認できる。
+Projectから新しいprofileやargvは追加できない。未設定・abort 時は `partial`、実際に走って回帰を報告した失敗・timeout は `failed` になる。いずれの場合も `done` は拒否される。`/ml-doctor`で実効profile、argv、timeout、許可元を確認できる。
 
 その他のキー:
 
@@ -200,8 +211,14 @@ Projectから新しいprofileやargvは追加できない。未設定・失敗�
 - `executor.maxParallel` — sfh の最大並列数（標準 4）
 - `executor.sfhAllowedTools` — 省略で制限なし、`[]`で全拒否、非空配列でallowlist
 - `executor.verifyProfiles` / `verifyProfile` — user承認済みargvとproject選択
+- `executor.verifyMode` — `per-ticket`（標準）/ `final`。`final` は実行ループ後に1回だけ verify し、`done` を主張したチケットをまとめて昇格させる
+- `executor.sfhIntegrateTool` — sfh 統合ステップの tool を明示（未指定ならモデル ID から推測）
+- `evidence.ignoreDirNames` / `parentMaxDepth` / `maxEntries` / `timeoutMs` — evidence スイープの範囲（user/base 層のみ。project 層は変更できない）
 - `limits.maxTasks` — チケット上限（標準 8）
 - `limits.perTaskOutputCap` — サブプロセスごとの出力上限
+- `limits.maxSupervisions` — 実行中の Supervisor 監査の予算（標準 12。初期/最終監査は常に実行）
+- `limits.scopeCeiling` — チケットの `allowed_scope` に対するハーネス側の天井
+- `allowProjectModelOverride` — project config に役割モデルの選択を許可する（標準 false）
 
 ## グループチケット（並列ブランチ＋統合約）
 
@@ -254,9 +271,18 @@ npm test
 
 ## セキュリティ
 
-この拡張はあなたの権限で `pi` サブプロセスを起動する。エージェントのプロンプトはこのリポジトリ内のもののみを使用する（プロジェクトローカルのエージェント定義は読み込まない）。他の pi パッケージと同様に、インストール前にコードを確認すること。
+- Orchestrator / Supervisor / Worker のデフォルト tools に **bash は含まれない**。
+- Worker の tools は **built-in の厳密 allowlist**（`read`/`write`/`edit`/`ls`/`find`/`grep`）。native worker は `--no-extensions -e scope-guard` で起動するため、project/user の拡張が tools を上書きできない。`allowed_scope` は write/edit で強制され、実行後に git + filesystem evidence でも検査される。alias/args/config 由来の bash・独自 tool は除去され、bash は tool_call ゲートでも拒否される。
+- ビルド/テストは **controller 側の決定論的 verify**（`verifyProfiles` の argv 配列、shell なし）。未設定・失敗・timeout のとき native `done` は**禁止**される（`evidence.verify` に記録）。
+- **verify profile の承認は、対象リポジトリ自身のコードを実行する許可を意味する。** `["npm","test"]` はそのリポジトリの `package.json` とテストコードが定義したものを実行する。profile が固定するのは*コマンド*であって、その先の中身ではない。手動でテストを走らせてよいと思えるリポジトリに限り、グローバルな `verifyCommands` よりプロジェクトごとの `executor.verifyProfile` 選択を優先すること。
+- `limits.scopeCeiling` は各チケットの `allowed_scope` の天井になる。未設定の場合、書き込み範囲は Orchestrator の計画が完全に決める。
+- sfh の並列グループは OS サンドボックスなしでは **read-only review**。`write`/`full` は plan/execute で拒否され（事後 evidence だけで done にはしない）、起動時と `/ml-doctor` で報告される。
+- project config は user/default に対して能力を**狭めることしかできない**: sfh access の引き上げ、sfhBinary の差し替え、tool allowlist の拡大、verify argv の追加、そして**役割モデルの選択**はできない（`allowProjectModelOverride` で明示的に許可した場合を除く）。
+- project の `standards.md` はプロンプト内で **untrusted な判定基準データ**として扱う。
+- `.pi/meta-loop/flows/` の生成物にはユーザーのテキストが含まれうる。gitignore し、シークレットをコミットしないこと。
+- run ディレクトリはプロンプトとモデル出力を保持する。新しい 20 件まで自動削除される。
 
-**入れ子起動の防止**: サブプロセスには `PI_META_LOOP_DEPTH >= 1` が渡され、この拡張は何も登録しない。worker・各役のサブプロセス・sfh が起動した pi は orchestrate を物理的に持たず、再帰は構造的に不可能。
+**入れ子起動の防止**: 子プロセスには `PI_META_LOOP_DEPTH >= 1` が渡されるため、この拡張は通常経路で何も登録しない。これは事故による再オーケストレーションを防ぐためのものであり、env を消して任意のバイナリを起動できるプロセスに対する**敵対的なセキュリティ境界ではない**（Worker はデフォルトで bash を持たない）。
 
 ## ロードマップ
 
@@ -273,6 +299,8 @@ npm test
 - [x] 0.2.6 — globstar scope 判定（`**/tests/**` のディレクトリ自体も許可）
 - [x] 0.2.6 — Worker bash 廃止（built-in のみ）/ sfh write/full は OS sandbox なしで拒否
 - [x] 0.3.0-rc.1 — verify profiles / `/ml-doctor` / SFH machine envelope / 配布契約
+- [x] 0.3.0-rc.2 — evidence の帰責、verify baseline と `verifyMode`、`limits.scopeCeiling`、
+      監査予算、役割プロンプトの英語化
 - [ ] Phase 3 — ハーネス診断（反復障害から rules/skills/prompts の弱点指摘）
 - [ ] Phase 4 — 進化ループ（ログとスコアの蓄積、外側 improver）— 研究寄り、任意
 

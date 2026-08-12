@@ -14,6 +14,7 @@ import {
 	listRuns,
 	readLatestRun,
 	readOwnerLock,
+	pruneRuns,
 	readRun,
 	runDir,
 	ticketCounts,
@@ -801,5 +802,49 @@ describe("board-store", () => {
 		// Original handle remains lost even after peer release.
 		assert.equal(a.refresh(), false);
 		a.release(); // idempotent after loss
+	});
+});
+
+describe("run retention", () => {
+	it("keeps the newest runs and never prunes the latest pointer", () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ml-prune-"));
+		const board: TaskBoard = {
+			goal: "g",
+			planSummary: "",
+			openQuestions: [],
+			tickets: [],
+			phase: "done",
+			reviewCount: 0,
+		};
+		const ids = ["run-1", "run-2", "run-3", "run-4", "run-5"];
+		ids.forEach((runId, i) => {
+			writeRun(cwd, {
+				runId,
+				cwd,
+				goal: "g",
+				status: "done",
+				label: "l",
+				// writeRun stamps updatedAt itself, so order comes from write order.
+				startedAt: new Date(2020, 0, i + 1).toISOString(),
+				updatedAt: new Date(2020, 0, i + 1).toISOString(),
+				board,
+				verdicts: [],
+			});
+		});
+
+		const removed = pruneRuns(cwd, 3);
+		assert.deepEqual(removed.sort(), ["run-1", "run-2"]);
+		assert.equal(readRun(cwd, "run-5") !== null, true, "latest pointer survives");
+		assert.equal(readRun(cwd, "run-4") !== null, true);
+		assert.equal(readRun(cwd, "run-3") !== null, true);
+		assert.equal(readRun(cwd, "run-1"), null);
+		assert.equal(fs.existsSync(path.join(cwd, ".pi", "meta-loop", "runs", "run-1")), false);
+	});
+
+	it("is a no-op below the retention count and for nonsense input", () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ml-prune-"));
+		assert.deepEqual(pruneRuns(cwd, 10), []);
+		assert.deepEqual(pruneRuns(cwd, 0), []);
+		assert.deepEqual(pruneRuns(cwd, Number.NaN), []);
 	});
 });

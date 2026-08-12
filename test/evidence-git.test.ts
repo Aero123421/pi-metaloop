@@ -58,7 +58,7 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 			// Pre-ticket dirty (untracked)
 			fs.writeFileSync(path.join(dir, "dirty.txt"), "v1\n", "utf-8");
 			const before = captureGitSnapshot(dir);
-			assert.equal(before.ok, true, before.error);
+			assert.equal(before.ok, true, before.error ?? "unknown error");
 			assert.ok(before.head);
 			assert.ok(before.indexHash);
 			assert.equal(before.fileHashes.get("dirty.txt") !== undefined, true);
@@ -66,7 +66,7 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 			// Additional mutation during ticket
 			fs.writeFileSync(path.join(dir, "dirty.txt"), "v2-mutated\n", "utf-8");
 			const after = captureGitSnapshot(dir);
-			assert.equal(after.ok, true, after.error);
+			assert.equal(after.ok, true, after.error ?? "unknown error");
 
 			const diff = diffGitSnapshots(before, after);
 			assert.ok(
@@ -84,7 +84,7 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 		const dir = initTmpRepo();
 		try {
 			const before = captureGitSnapshot(dir);
-			assert.equal(before.ok, true, before.error);
+			assert.equal(before.ok, true, before.error ?? "unknown error");
 			const headBefore = before.head;
 
 			fs.writeFileSync(path.join(dir, "during.txt"), "committed-in-ticket\n", "utf-8");
@@ -92,7 +92,7 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 			git(dir, ["commit", "-m", "ticket-commit"]);
 
 			const after = captureGitSnapshot(dir);
-			assert.equal(after.ok, true, after.error);
+			assert.equal(after.ok, true, after.error ?? "unknown error");
 			assert.notEqual(after.head, headBefore);
 
 			const diff = diffGitSnapshots(before, after);
@@ -110,7 +110,7 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 			fs.writeFileSync(path.join(dir, "staged.txt"), "staged-in-ticket\n", "utf-8");
 			git(dir, ["add", "staged.txt"]);
 			const after = captureGitSnapshot(dir);
-			assert.equal(after.ok, true, after.error);
+			assert.equal(after.ok, true, after.error ?? "unknown error");
 
 			const diff = diffGitSnapshots(before, after);
 			assert.equal(diff.headChanged, false);
@@ -125,7 +125,7 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 		const dir = initTmpRepo();
 		try {
 			const before = captureGitSnapshot(dir);
-			assert.equal(before.ok, true, before.error);
+			assert.equal(before.ok, true, before.error ?? "unknown error");
 			// Control-plane paths are always hashed; worktree should be clean.
 			assert.ok([...before.fileHashes.keys()].every((p) => p === ".git" || p.startsWith(".git/")),
 				`expected only control-plane hashes before dirty worktree, got ${[...before.fileHashes.keys()].join(",")}`,
@@ -133,7 +133,7 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 
 			fs.writeFileSync(path.join(dir, "brand-new.txt"), "hello\n", "utf-8");
 			const after = captureGitSnapshot(dir);
-			assert.equal(after.ok, true, after.error);
+			assert.equal(after.ok, true, after.error ?? "unknown error");
 
 			const diff = diffGitSnapshots(before, after);
 			assert.ok(
@@ -152,7 +152,7 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 		try {
 			const headSha = git(dir, ["rev-parse", "HEAD"]).trim();
 			const before = captureGitSnapshot(dir);
-			assert.equal(before.ok, true, before.error);
+			assert.equal(before.ok, true, before.error ?? "unknown error");
 
 			// Write a non-checkout branch ref directly — does not dirty worktree/HEAD/index.
 			const refPath = path.join(dir, ".git", "refs", "heads", "attacker-branch");
@@ -160,7 +160,7 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 			fs.writeFileSync(refPath, `${headSha}\n`, "utf-8");
 
 			const after = captureGitSnapshot(dir);
-			assert.equal(after.ok, true, after.error);
+			assert.equal(after.ok, true, after.error ?? "unknown error");
 			const diff = diffGitSnapshots(before, after);
 			const changed = [...diff.newFiles, ...diff.mutatedPreDirty];
 			assert.ok(
@@ -186,7 +186,7 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 		const dir = initTmpRepo();
 		try {
 			const before = captureGitSnapshot(dir);
-			assert.equal(before.ok, true, before.error);
+			assert.equal(before.ok, true, before.error ?? "unknown error");
 
 			const configPath = path.join(dir, ".git", "config");
 			fs.appendFileSync(configPath, "\n[user]\n\tname = pwned\n", "utf-8");
@@ -195,7 +195,7 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 			fs.writeFileSync(hookPath, "#!/bin/sh\necho pwned\n", "utf-8");
 
 			const after = captureGitSnapshot(dir);
-			assert.equal(after.ok, true, after.error);
+			assert.equal(after.ok, true, after.error ?? "unknown error");
 			const diff = diffGitSnapshots(before, after);
 			const changed = [...diff.newFiles, ...diff.mutatedPreDirty];
 			assert.ok(changed.some((p) => p.endsWith(".git/config") || p === ".git/config"), JSON.stringify(changed));

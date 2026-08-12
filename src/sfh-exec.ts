@@ -301,43 +301,51 @@ export function generateFlowYaml(spec: FlowSpec): string {
 	return lines.join("\n");
 }
 
+/**
+ * Branch and integration prompts are English so that any preset tool behaves the
+ * same way; each one is told to answer in the user's language, which is carried
+ * verbatim in the goal below.
+ */
 export function renderBranchPrompt(branch: Branch, ticket: Ticket, userGoal: string): string {
 	return [
-		"あなたは並列グループチケットの1ブランチです。担当範囲だけを実行し、結果を報告してください。",
+		"You are one branch of a parallel group ticket. Do your assigned part only, then report.",
+		"Answer in the language the user wrote in.",
 		"",
-		`## あなたの担当`,
+		"## Your assignment",
 		branch.prompt,
 		"",
-		`## グループの目的`,
+		"## Purpose of the group",
 		ticket.goal,
-		...(ticket.context ? ["", "## 補足コンテキスト", ticket.context] : []),
+		...(ticket.context ? ["", "## Additional context", ticket.context] : []),
 		"",
-		`## ユーザーの要求（原文）`,
+		"## User request (verbatim)",
 		userGoal,
 		"",
-		"他のブランチの作業は別のエージェントが並行して担当しています。担当外に手を出さないでください。",
+		"Other branches are running in parallel under different agents. Do not take on their work.",
 	].join("\n");
 }
 
 export function renderIntegrationPrompt(ticket: Ticket, userGoal: string): string {
 	const acceptance = ticket.integration?.acceptance ?? [];
 	return [
-		"これは統合ステップです。並列ブランチの出力を受け取り、単一の統合報告にまとめてください。",
+		"This is the integration step. Take the parallel branch outputs and merge them into a single report.",
+		"Answer in the language the user wrote in.",
 		"",
-		"## 統合約（acceptance）",
-		...(acceptance.length > 0 ? acceptance.map((a) => `- ${a}`) : ["- 全ブランチの出力を網羅する"]),
-		...(ticket.integration?.output ? ["", `## 期待する成果物: ${ticket.integration.output}`] : []),
+		"## Integration contract (acceptance)",
+		...(acceptance.length > 0 ? acceptance.map((a) => `- ${a}`) : ["- cover the output of every branch"]),
+		...(ticket.integration?.output ? ["", `## Expected artifact: ${ticket.integration.output}`] : []),
 		"",
-		"## グループの目的",
+		"## Purpose of the group",
 		ticket.goal,
 		"",
-		"## ユーザーの要求（原文）",
+		"## User request (verbatim)",
 		userGoal,
 		"",
-		"## 各ブランチの出力",
+		"## Branch outputs",
 		"{{steps.fanout.outputs}}",
 		"",
-		"acceptance を満たす統合報告を Markdown で出力してください。重複は排除し、矛盾点は列挙し、各記述に出典ブランチを明記してください。",
+		"Produce a Markdown report that satisfies the acceptance criteria. Remove duplication, list every",
+		"contradiction you find, and attribute each statement to the branch it came from.",
 	].join("\n");
 }
 
