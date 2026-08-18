@@ -20,6 +20,13 @@
   that produced no usable verdict. An unparseable initial audit stops the run before any
   ticket executes; that outcome now leaves evidence behind.
 
+- Ticket rules are checked at plan time, not first at execute time. `validateTicket` now runs
+  over every ticket the Orchestrator produces (and every ticket a revision introduces), so a
+  plan the harness would block is retried with the reason instead of being handed to the
+  Supervisor. Previously the Supervisor was paid to audit work the harness had already decided
+  to refuse, and the user learned about it as a stopped run with everything blocked. A plan that
+  cannot be made usable now ends `plan_failed` without spending an audit at all.
+
 - `RuntimeHooks.runRole` — a test seam for the execute loop, and `test/execute-loop.test.ts`
   driving `runSupervisedTask` through it. Until now no test touched `runSupervisedTask` at all:
   every one of the 200-odd tests exercised an extracted pure function, which is why the
