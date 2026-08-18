@@ -3,7 +3,6 @@ import { describe, it } from "node:test";
 import {
 	AWAITING_FINAL_VERIFY,
 	finalizeFromEvidence,
-	resolveIntegrateTool,
 } from "../src/runtime.ts";
 import { isPreExistingFailure, toVerifyBaseline, verifySignature } from "../src/verify.ts";
 import type { ExecutionEvidence, Ticket, VerifyEvidence, WorkerClaim } from "../src/types.ts";
@@ -135,17 +134,5 @@ describe("verifyMode=final defers the gate", () => {
 		);
 		assert.equal(t.status, "failed");
 		assert.notEqual(t.error, AWAITING_FINAL_VERIFY);
-	});
-});
-
-describe("sfh integrate tool resolution", () => {
-	it("prefers an explicit setting over any model inference", () => {
-		assert.deepEqual(resolveIntegrateTool("pi", "openai-codex/gpt-5"), { tool: "pi", inferred: false });
-	});
-
-	it("reports when the tool was inferred from a model id", () => {
-		assert.deepEqual(resolveIntegrateTool(undefined, "gpt-5-codex"), { tool: "codex", inferred: true });
-		assert.deepEqual(resolveIntegrateTool("", "anthropic/claude"), { tool: "pi", inferred: false });
-		assert.deepEqual(resolveIntegrateTool(undefined, undefined), { tool: "pi", inferred: false });
 	});
 });

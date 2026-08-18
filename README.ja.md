@@ -2,7 +2,7 @@
 
 **Status: リリース候補。正確な版は `package.json` を参照。** [pi](https://github.com/earendil-works/pi) 向け適応型監督オーケストレーション。
 
-短いタスクは軽いまま。長いタスクは Orchestrator + Supervisor + Worker/sfh。**初回監査は fail-closed**、完了は **evidence ベース**、権限は **能力境界**（プロンプトだけに頼らない）。
+短いタスクは軽いまま。長いタスクは Orchestrator + Supervisor + Worker。**初回監査は fail-closed**、完了は **evidence ベース**、権限は **能力境界**（プロンプトだけに頼らない）。
 
 [English README](./README.md)
 
@@ -18,22 +18,10 @@
 ## 前提（必須依存）
 
 - [pi](https://github.com/earendil-works/pi)（この拡張の本体）
-- **[sfh (SimpleFlowHarness)](https://github.com/Aero123421/SimpleFlowHarness) — 任意**。グループチケット（`execution: "sfh"`）にのみ必要で、それ以外は無くても動く
-
-```bash
-# Windows PowerShell
-irm https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.ps1 | iex
-# macOS / Linux
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.sh | sh
-```
-
-sfh 未インストールの場合、グループチケットはインストール手順付きのエラーでブロックされ、それ以外は通常どおり動く。`/ml-doctor` は sfh 未導入を「問題」ではなく情報として表示する。
-
 | 依存 | 対応範囲 |
 |---|---|
 | Node.js | `>=22.19.0` |
 | pi / pi-ai | `^0.83.0` |
-| SFH（任意） | `>=1.4.0`、machine schema `1`（`sfh run/preflight --json`） |
 
 ## 動作
 
@@ -122,7 +110,7 @@ pi install /path/to/pi-meta-loop
 /skill:meta-loop-setup
 ```
 
-対話でuser/projectスコープ、役別モデル、sfh設定、承認済みverify profile、standardsを決め、`~/.pi/agent/meta-loop/`や`.pi/meta-loop/`に書き出す。
+対話でuser/projectスコープ、役別モデル、承認済みverify profile、standardsを決め、`~/.pi/agent/meta-loop/`や`.pi/meta-loop/`に書き出す。
 
 ## 設定
 
@@ -155,34 +143,6 @@ pi install /path/to/pi-meta-loop
 
 空文字 = pi のデフォルト継承。形式は pi の `--model` と同じ。
 
-### sfh モデル（並列グループのブランチ）
-
-sfh はステップ単位で `model` を取れる。ブランチごとの解決順:
-
-1. チケットの `branches[].model`（Orchestrator が明示）
-2. `executor.sfhToolModels[tool]`（tool ごとの既定）
-3. `executor.sfhModel`（sfh 全体の既定）
-4. `tool: pi` のときだけ `roles.worker.model`
-
-統合ステップは `sfhIntegrateModel` → `sfhModel` → `roles.worker.model`。
-
-```json
-{
-  "executor": {
-    "sfhModel": "",
-    "sfhIntegrateModel": "",
-    "sfhToolModels": {
-      "pi": "provider/model-id",
-      "opencode": "",
-      "codex": "",
-      "claude": ""
-    }
-  }
-}
-```
-
-例: `examples/user-meta-loop.config.example.json` / `examples/project-meta-loop.config.example.json`
-
 ### trusted verify profile
 
 Native Worker の`done`にはcontroller-side verifyの成功が必須。user configで承認済みargvを定義し、project configはprofile名だけを選ぶ。
@@ -205,41 +165,16 @@ Projectから新しいprofileやargvは追加できない。未設定・abort �
 - `supervisor.checkIntervalMinutes` — 定期監査間隔（標準 30 分）
 - `supervisor.workerStartThreshold` — Worker 起動数がこの値に達したら監査（標準 6）
 - `supervisor.maxConsecutiveFailures` — この数の連続失敗で即時監査（標準 2）
-- `executor.sfhEnabled` — グループチケットを sfh に委譲するか（標準 true）
-- `executor.sfhBinary` — sfh バイナリ名/パス（標準 `sfh`）
 - `executor.timeoutSec` — グループごとの壁時計上限（標準 1800）
-- `executor.maxParallel` — sfh の最大並列数（標準 4）
-- `executor.sfhAllowedTools` — 省略で制限なし、`[]`で全拒否、非空配列でallowlist
+- `executor.maxParallel` — 並列実行の上限（native worker は現状直列のため未使用。issue #4 で実装）
 - `executor.verifyProfiles` / `verifyProfile` — user承認済みargvとproject選択
 - `executor.verifyMode` — `per-ticket`（標準）/ `final`。`final` は実行ループ後に1回だけ verify し、`done` を主張したチケットをまとめて昇格させる
-- `executor.sfhIntegrateTool` — sfh 統合ステップの tool を明示（未指定ならモデル ID から推測）
 - `evidence.ignoreDirNames` / `parentMaxDepth` / `maxEntries` / `timeoutMs` — evidence スイープの範囲（user/base 層のみ。project 層は変更できない）
 - `limits.maxTasks` — チケット上限（標準 8）
 - `limits.perTaskOutputCap` — サブプロセスごとの出力上限
 - `limits.maxSupervisions` — 実行中の Supervisor 監査の予算（標準 12。初期/最終監査は常に実行）
 - `limits.scopeCeiling` — チケットの `allowed_scope` に対するハーネス側の天井
 - `allowProjectModelOverride` — project config に役割モデルの選択を許可する（標準 false）
-
-## グループチケット（並列ブランチ＋統合約）
-
-Orchestrator は、調査・探索・比較のような並列向き作業を複数チケットではなく **1 枚のグループチケット** として切れる:
-
-```json
-{
-  "id": "research-01",
-  "execution": "sfh",
-  "goal": "OAuth 対応の調査と既存コード探索",
-  "branches": [
-    { "id": "web", "tool": "opencode", "prompt": "ライブラリ比較…" },
-    { "id": "code", "tool": "pi", "prompt": "既存認証フローの調査…" }
-  ],
-  "integration": { "acceptance": ["全ブランチ網羅", "矛盾点列挙", "出典明記"] }
-}
-```
-
-runtimeは`flow.yaml`を生成し、`sfh preflight --json`で検査後、`PI_META_LOOP_DEPTH=1`を持って`sfh run --json`を実行する。machine schema `1`、run ID、run dir、stable error codeを直接検証・保存する。
-
-実装チケットはネイティブ（Worker の pi サブプロセス）のまま。グループは並列化できる調査系作業専用。
 
 ## コマンドと UX
 
@@ -250,14 +185,12 @@ runtimeは`flow.yaml`を生成し、`sfh preflight --json`で検査後、`PI_MET
 - `/verdicts` — Supervisor の判定履歴
 - `/ml-stop` — 実行中の supervised run を中断
 - `/ml-runs` — ディスク上の run 履歴（`.pi/meta-loop/runs/`）
-- `/ml-doctor` — native done条件とSFH machine/preflight診断
-- `/sfh` — sfh 実行履歴。`/sfh stop` で最新 run 停止
-- supervised 中は **色付き統合パネル**（meta-loop + sfh）とフッターで進捗表示
+- `/ml-doctor` — native done 条件と、実効的な能力境界
+- supervised 中は **フラットな色付きパネル**とフッターで進捗表示
 - `/ml-ui` — 詳細度 `compact|normal|full`（`show`/`hide` 可）。ショートカット `ctrl+shift+m`
 - 終了 run は約90秒で **自動非表示**（stopped が永遠に残らない）。`/tasks` で再表示
 - 役サブプロセスの task は **stdin** 渡し（Windows の ENAMETOOLONG を回避）
 - **ソフトな途中昇格**: tool 回数・パス数・write 数、または長い要求文で一度だけ `orchestrate` 検討を nudge（強制しない）
-- sfh フロー実行中もフッター + ウィジェット。stuck は必ず通知
 
 内部実況はウィジェット側。チャット本文には計画・必要な判断・完了サマリを出す。
 
@@ -276,8 +209,8 @@ npm test
 - ビルド/テストは **controller 側の決定論的 verify**（`verifyProfiles` の argv 配列、shell なし）。未設定・失敗・timeout のとき native `done` は**禁止**される（`evidence.verify` に記録）。
 - **verify profile の承認は、対象リポジトリ自身のコードを実行する許可を意味する。** `["npm","test"]` はそのリポジトリの `package.json` とテストコードが定義したものを実行する。profile が固定するのは*コマンド*であって、その先の中身ではない。手動でテストを走らせてよいと思えるリポジトリに限り、グローバルな `verifyCommands` よりプロジェクトごとの `executor.verifyProfile` 選択を優先すること。
 - `limits.scopeCeiling` は各チケットの `allowed_scope` の天井になる。未設定の場合、書き込み範囲は Orchestrator の計画が完全に決める。
-- sfh の並列グループは OS サンドボックスなしでは **read-only review**。`write`/`full` は plan/execute で拒否され（事後 evidence だけで done にはしない）、起動時と `/ml-doctor` で報告される。
-- project config は user/default に対して能力を**狭めることしかできない**: sfh access の引き上げ、sfhBinary の差し替え、tool allowlist の拡大、verify argv の追加、そして**役割モデルの選択**はできない（`allowProjectModelOverride` で明示的に許可した場合を除く）。
+- ハーネスが介入できない executor の worker は拒否される。scope の執行はツールコール時に行われるので、介入できない executor は事後 evidence でしか確認できず、それは検出のバックストップであって執行機構ではない。
+- project config は user/default に対して能力を**狭めることしかできない**: tool allowlist の拡大、verify argv の追加、そして**役割モデルの選択**はできない（`allowProjectModelOverride` で明示的に許可した場合を除く）。
 - project の `standards.md` はプロンプト内で **untrusted な判定基準データ**として扱う。
 - `.pi/meta-loop/flows/` の生成物にはユーザーのテキストが含まれうる。gitignore し、シークレットをコミットしないこと。
 - run ディレクトリはプロンプトとモデル出力を保持する。新しい 20 件まで自動削除される。
@@ -301,6 +234,8 @@ npm test
 - [x] 0.3.0-rc.1 — verify profiles / `/ml-doctor` / SFH machine envelope / 配布契約
 - [x] 0.3.0-rc.2 — evidence の帰責、verify baseline と `verifyMode`、`limits.scopeCeiling`、
       監査予算、役割プロンプトの英語化
+- [x] 0.4.0 — sfh executor を撤去し拡張単体で動作。マルチ CLI worker
+      （pi / codex / claude / cursor / grok / agy / opencode）は issue #4 で追跡
 - [ ] Phase 3 — ハーネス診断（反復障害から rules/skills/prompts の弱点指摘）
 - [ ] Phase 4 — 進化ループ（ログとスコアの蓄積、外側 improver）— 研究寄り、任意
 

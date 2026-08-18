@@ -90,7 +90,7 @@ export function escalationMessage(stats: EscalationStats): string {
 	return [
 		"[pi-meta-loop] This is starting to look like a long task.",
 		`observed: tool_calls=${stats.toolCalls}, distinct_paths=${stats.paths.size}, writes=${stats.writes}`,
-		"Consider the `orchestrate` tool to switch to supervised division of labor (Orchestrator + Supervisor + Workers/sfh) before a misalignment gets expensive to undo.",
+		"Consider the `orchestrate` tool to switch to supervised division of labor (Orchestrator + Supervisor + Workers) before a misalignment gets expensive to undo.",
 		"Ignore this for short questions, discussion, or a single-file fix.",
 	].join("\n");
 }

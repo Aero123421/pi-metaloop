@@ -28,22 +28,6 @@ export type BoardPhase =
 	| "degraded"
 	| "plan_failed";
 
-/** Parallel group branch */
-export interface Branch {
-	id: string;
-	tool?: string;
-	model?: string;
-	effort?: string;
-	/** Forced to read for sfh groups by the harness */
-	access?: string;
-	prompt: string;
-}
-
-export interface IntegrationContract {
-	acceptance: string[];
-	output?: string;
-}
-
 export interface WorkerClaim {
 	claimedStatus?: "done" | "partial" | "blocked";
 	changed_files?: string[];
@@ -98,13 +82,6 @@ export interface ExecutionEvidence {
 	actualChangedFiles: string[];
 	scopeViolations: string[];
 	claimedStatus?: string;
-	sfh?: {
-		schemaVersion: number;
-		version?: string;
-		runId?: string;
-		runDir?: string;
-		errorCode?: string;
-	};
 	/** Present on native implementation tickets after controller verify gate. */
 	verify?: VerifyEvidence;
 }
@@ -118,9 +95,12 @@ export interface Ticket {
 	forbidden: string[];
 	dependencies: string[];
 	context?: string;
-	execution?: "native" | "sfh";
-	branches?: Branch[];
-	integration?: IntegrationContract;
+	/**
+	 * Which executor runs the ticket. Only the native pi worker exists today; the field
+	 * is the extension point for the multi-CLI executor (issue #4). Boards written by
+	 * older versions may carry other values — they are read for display, never executed.
+	 */
+	execution?: "native";
 	status: TicketStatus;
 	report?: string;
 	error?: string;

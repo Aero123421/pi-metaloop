@@ -5,16 +5,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { MetaLoopConfig } from "./config.ts";
-import {
-	assertSfhToolAllowed,
-	loadStandards,
-	resolveSfhBranchAccess,
-	resolveSfhBranchEffort,
-	resolveSfhBranchModel,
-	resolveSfhIntegrateAccess,
-	resolveSfhIntegrateEffort,
-	resolveSfhIntegrateModel,
-} from "./config.ts";
+import { loadStandards } from "./config.ts";
 import {
 	captureGitSnapshot,
 	diffGitSnapshots,
@@ -28,18 +19,6 @@ import {
 	filesystemEvidencePath,
 	type FilesystemSnapshot,
 } from "./fs-snapshot.ts";
-import {
-	detectSfh,
-	generateFlowYaml,
-	renderBranchPrompt,
-	renderIntegrationPrompt,
-	runSfhPreflight,
-	runSfhFlow,
-	sanitizeId,
-	validateSfhTool,
-	writeFlowFile,
-	type FlowSpec,
-} from "./sfh-exec.ts";
 import { extractJson, loadRole, runRole } from "./spawn.ts";
 import { checkAutoTriggers, evaluateTriggers, type RuntimeEvent, type SupervisorStats } from "./triggers.ts";
 import {
@@ -80,7 +59,7 @@ const BOARD_PHASES = new Set<string>([
 
 export interface RuntimeHooks {
 	onPhase?: (board: TaskBoard, label: string) => void;
-	/** Live worker/sfh text tail (not a phase change). */
+	/** Live worker text tail (not a phase change). */
 	onActivity?: (text: string) => void;
 	signal?: AbortSignal;
 	/** If set, raw role outputs are written here (plan attempts, etc.). */
@@ -110,6 +89,12 @@ export function addUsage(total: UsageStats, next: UsageStats | undefined): Usage
 	total.cost += next.cost;
 	total.turns += next.turns;
 	return total;
+}
+
+/** Filename-safe ticket id for run artifacts. */
+function sanitizeId(id: string): string {
+	const cleaned = id.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+	return cleaned.slice(0, 60) || "ticket";
 }
 
 function writeHookArtifact(dir: string | undefined, name: string, content: string): void {
@@ -179,22 +164,7 @@ function toTicket(t: any, i: number, previous?: Ticket): Ticket {
 		forbidden: Array.isArray(t.forbidden) ? t.forbidden.map(String) : previous?.forbidden ?? [],
 		dependencies: Array.isArray(t.dependencies) ? t.dependencies.map(String) : previous?.dependencies ?? [],
 		context: t.context != null ? String(t.context) : previous?.context,
-		execution: t.execution === "sfh" ? "sfh" : t.execution === "native" ? "native" : previous?.execution ?? "native",
-		branches:
-			Array.isArray(t.branches) && t.branches.length > 0
-				? t.branches.map((b: any, j: number) => ({
-						id: String(b.id ?? `branch-${j + 1}`),
-						tool: typeof b.tool === "string" ? b.tool : undefined,
-						model: typeof b.model === "string" ? b.model : undefined,
-						effort: typeof b.effort === "string" ? b.effort : undefined,
-						access: typeof b.access === "string" ? b.access : undefined,
-						prompt: String(b.prompt ?? ""),
-					}))
-				: previous?.branches,
-		integration:
-			t.integration && Array.isArray(t.integration.acceptance)
-				? { acceptance: t.integration.acceptance.map(String), output: t.integration.output }
-				: previous?.integration,
+		execution: "native",
 		status: previous?.status ?? "pending",
 		report: previous?.report,
 		error: previous?.error,
@@ -249,17 +219,6 @@ function pendingRevisionFingerprint(tickets: Ticket[]): string {
 				dependencies: ticket.dependencies,
 				context: ticket.context ?? null,
 				execution: ticket.execution ?? "native",
-				branches: (ticket.branches ?? []).map((branch) => ({
-					id: branch.id,
-					tool: branch.tool ?? null,
-					model: branch.model ?? null,
-					effort: branch.effort ?? null,
-					access: branch.access ?? null,
-					prompt: branch.prompt,
-				})),
-				integration: ticket.integration
-					? { acceptance: ticket.integration.acceptance, output: ticket.integration.output ?? null }
-					: null,
 			})),
 	);
 }
@@ -324,7 +283,6 @@ export function formatBoardForSupervisor(board: TaskBoard, opts?: { compact?: bo
 								processExitCode: t.evidence.processExitCode,
 								actualChangedFiles: (t.evidence.actualChangedFiles || []).slice(0, compact ? 12 : 50),
 								scopeViolations: (t.evidence.scopeViolations || []).slice(0, compact ? 6 : 20),
-								sfh: t.evidence.sfh,
 								// The Supervisor is asked to judge from evidence rather than claims,
 								// so it has to actually receive the controller's verdict on the gate.
 								inconclusive: t.evidence.inconclusive,
@@ -343,13 +301,8 @@ export function formatBoardForSupervisor(board: TaskBoard, opts?: { compact?: bo
 				if (!compact) {
 					base.deliverables = t.deliverables;
 					base.context = t.context;
-					base.branches = t.branches;
-					base.integration = t.integration;
 					base.claim = t.claim;
 					base.report = t.report?.slice(0, 4000);
-				} else if (t.execution === "sfh") {
-					base.branchIds = (t.branches || []).map((b) => b.id);
-					base.integrationAcceptance = t.integration?.acceptance;
 				}
 				return base;
 			}),
@@ -371,7 +324,7 @@ export function validatePlanGraph(tickets: Ticket[]): string | null {
 			if (d === t.id) return `self-dependency: ${t.id}`;
 			if (!ids.has(d)) return `missing dependency ${d} referenced by ${t.id}`;
 		}
-		if (t.execution !== "sfh" && t.acceptance.length === 0) {
+		if (t.acceptance.length === 0) {
 			return `native ticket ${t.id} has empty acceptance`;
 		}
 	}
@@ -396,58 +349,15 @@ export function validatePlanGraph(tickets: Ticket[]): string | null {
 	return null;
 }
 
-/** write/full sfh cannot authorize mutations without an explicit non-empty scope. */
-export function sfhWriteRequiresAllowedScope(
-	maxAccess: string,
-	allowedScope: string[] | undefined,
-): string | null {
-	const access = (maxAccess || "read").toLowerCase();
-	if ((access === "write" || access === "full") && !(allowedScope?.length)) {
-		return 'execution:"sfh" with write/full access requires non-empty allowed_scope';
-	}
-	return null;
-}
-
-/**
- * Without an OS sandbox, sfh write/full cannot enforce allowed_scope. Post-hoc
- * git/fs evidence is not sufficient to mark such work done. Read-only review remains.
- */
-export function sfhMutatingAccessUnsupported(maxAccess: string): string | null {
-	const access = (maxAccess || "read").toLowerCase();
-	if (access === "write" || access === "full") {
-		return 'execution:"sfh" write/full is unsupported without an OS sandbox (read-only review only; use native workers with interceptable built-in tools for scoped edits)';
-	}
-	return null;
-}
-
 export function validateTicket(ticket: Ticket, scopeCeiling?: string[]): string | null {
-	if (ticket.execution === "sfh") {
-		if (!ticket.branches?.length) return 'execution:"sfh" requires non-empty branches';
-		if (!ticket.integration?.acceptance?.length) return 'execution:"sfh" requires integration.acceptance';
-		const seen = new Set<string>();
-		let explicitWrite = false;
-		for (const b of ticket.branches) {
-			if (!b.id.trim()) return "branch.id empty";
-			if (!b.prompt.trim()) return `branch "${b.id}" prompt empty`;
-			const toolError = validateSfhTool(b.tool, `branch ${b.id}`);
-			if (toolError) return toolError;
-			const sid = sanitizeId(b.id);
-			if (seen.has(sid)) return `branch id collides after sanitize: ${b.id} → ${sid}`;
-			seen.add(sid);
-			const access = (b.access ?? "").toLowerCase();
-			if (access === "write" || access === "full") explicitWrite = true;
-		}
-		// Plan-time fail-closed: write/full is unsupported without an OS sandbox.
-		// Config-resolved write/full is enforced again at execute time.
-		if (explicitWrite) {
-			const unsup = sfhMutatingAccessUnsupported("write");
-			if (unsup) return unsup;
-		}
-	} else {
-		// native implementation tickets must declare a non-empty write scope (fail closed)
-		if (!ticket.allowed_scope?.length) {
-			return 'native implementation ticket requires non-empty allowed_scope';
-		}
+	// Only the native pi worker exists. An unknown executor is a plan the harness cannot
+	// enforce scope for, so it is refused rather than silently run as native (issue #4).
+	if (ticket.execution !== undefined && ticket.execution !== "native") {
+		return `unknown execution "${String(ticket.execution)}" — only "native" is supported`;
+	}
+	// native implementation tickets must declare a non-empty write scope (fail closed)
+	if (!ticket.allowed_scope?.length) {
+		return 'native implementation ticket requires non-empty allowed_scope';
 	}
 	// A plan is model output; without a ceiling the write surface is chosen entirely
 	// by the Orchestrator. When the user set one, the plan must stay inside it.
@@ -502,17 +412,6 @@ function parseWorkerClaim(output: string): WorkerClaim {
 		notes: j.notes != null ? String(j.notes) : undefined,
 		raw: output.slice(0, 8000),
 	};
-}
-
-/** Production sfh result classification; empty stdout is never completion evidence. */
-export function sfhStatusFromResult(
-	exitCode: number,
-	stdout: string,
-	scopeViolations: string[],
-): Ticket["status"] {
-	if (exitCode !== 0) return "failed";
-	if (scopeViolations.length > 0) return "failed";
-	return stdout.trim().length > 0 ? "done" : "partial";
 }
 
 /** Marker recorded on tickets whose verify was deferred to the end of the run. */
@@ -647,7 +546,7 @@ function evaluateGitEvidence(
 	ticket: Ticket,
 	before: GitSnapshot,
 	after: GitSnapshot,
-	opts?: { readOnlyAccess?: boolean; gitCapableWorker?: boolean },
+	opts?: { gitCapableWorker?: boolean },
 ): GitEvidenceOutcome {
 	if (!before.ok) {
 		return {
@@ -693,9 +592,7 @@ function evaluateGitEvidence(
 	}
 
 	let scopeViolations: string[] = [];
-	if (opts?.readOnlyAccess) {
-		scopeViolations = actualChangedFiles.map((f) => `${f}: sfh access is read — writes are not allowed`);
-	} else if ((ticket.allowed_scope?.length ?? 0) > 0 || (ticket.forbidden?.length ?? 0) > 0) {
+	if ((ticket.allowed_scope?.length ?? 0) > 0 || (ticket.forbidden?.length ?? 0) > 0) {
 		// mutatedPreDirty included — out-of-scope only fails; in-scope dirty mutation is legitimate work
 		scopeViolations = findScopeViolations(
 			actualChangedFiles,
@@ -704,7 +601,7 @@ function evaluateGitEvidence(
 			ticket.forbidden ?? [],
 		);
 	} else if (actualChangedFiles.length > 0) {
-		// Fail closed: write/full (or native) without declared scope cannot authorize mutations.
+		// Fail closed: a worker without declared scope cannot authorize mutations.
 		scopeViolations = actualChangedFiles.map(
 			(f) => `${f}: non-empty allowed_scope required to authorize writes`,
 		);
@@ -753,30 +650,6 @@ export function evaluateFilesystemEvidence(
 	return { actualChangedFiles, scopeViolations };
 }
 
-/**
- * Which tool runs the sfh integrate step.
- *
- * `executor.sfhIntegrateTool` is authoritative. Without it, a model id that
- * clearly names codex still selects the codex tool, for configs written before
- * the setting existed — but that inference is reported on the ticket, because
- * silently swapping the executor because of a substring in a model name is the
- * kind of surprise that turns into an unexplained `blocked`.
- */
-export function resolveIntegrateTool(
-	configured: string | undefined,
-	model: string | undefined,
-	fallback = "pi",
-): { tool: string; inferred: boolean } {
-	const explicit = configured?.trim();
-	if (explicit) return { tool: explicit, inferred: false };
-	if (!model) return { tool: fallback, inferred: false };
-	const m = model.toLowerCase();
-	if (m.includes("openai-codex") || m.startsWith("gpt-5") || m.includes("codex")) {
-		return { tool: "codex", inferred: true };
-	}
-	return { tool: fallback, inferred: false };
-}
-
 export type VerdictDisposition =
 	| { action: "continue"; guidance: [] }
 	| { action: "revise"; guidance: string[] }
@@ -823,8 +696,7 @@ export function buildPrimarySummary(board: TaskBoard, verdicts: Verdict[]): stri
 		if (t.claim?.assumptions?.length) lines.push(`- assumptions: ${t.claim.assumptions.join("; ")}`);
 		if (t.evidence?.scopeViolations?.length) lines.push(`- scope_violations: ${t.evidence.scopeViolations.join("; ")}`);
 		if (t.error) lines.push(`- error: ${t.error.slice(0, 500)}`);
-		if (t.execution === "sfh" && t.report) lines.push(`- sfh_report:\n${t.report.slice(0, 3000)}`);
-		else if (t.report && t.execution !== "sfh") lines.push(`- report_excerpt: ${t.report.slice(0, 800)}`);
+		if (t.report) lines.push(`- report_excerpt: ${t.report.slice(0, 800)}`);
 		lines.push("");
 	}
 	const nongreen = verdicts.filter((v) => v.verdict !== "green");
@@ -870,7 +742,7 @@ export async function runSupervisedTask(
 	/** Mid-run Supervisor calls spent so far (initial/final audits are never budgeted). */
 	let supervisions = 0;
 	// Role subprocesses already report tokens and cost; aggregate them so the run
-	// can show its own spend instead of only sfh's.
+	// can show its own spend.
 	const usage = emptyRunUsage();
 
 	const orchestrator = loadRole("orchestrator", config.roles.orchestrator);
@@ -1230,221 +1102,6 @@ export async function runSupervisedTask(
 		return (await superviseWithReaudit("mid", reason, failClosed)).action;
 	}
 
-	async function executeGroupTicket(ticket: Ticket): Promise<void> {
-		const ex = config.executor;
-		const branches = ticket.branches ?? [];
-		if (!ex.sfhEnabled) {
-			ticket.status = "blocked";
-			ticket.error = "executor.sfhEnabled=false";
-			return;
-		}
-		const binary = detectSfh(ex.sfhBinary);
-		if (!binary) {
-			ticket.status = "blocked";
-			ticket.error = [
-				"sfh is not installed (required for group tickets).",
-				"Windows: irm https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.ps1 | iex",
-				"macOS/Linux: see https://github.com/Aero123421/SimpleFlowHarness",
-			].join("\n");
-			return;
-		}
-		for (const b of branches) {
-			const err = assertSfhToolAllowed(b.tool, config);
-			if (err) {
-				ticket.status = "blocked";
-				ticket.error = err;
-				return;
-			}
-		}
-		const runId = `${sanitizeId(ticket.id)}-${Date.now().toString(36)}`;
-		const flowName = `meta-loop-${runId}`;
-		const branchAccesses = branches.map((b) => resolveSfhBranchAccess(b, config));
-		const integrateModel = resolveSfhIntegrateModel(config);
-		// Integrate access has its own user/global ceiling. Never raise it to match a branch:
-		// a read-only integrate ceiling must remain read even when a branch is write/full.
-		const integrateAccess = resolveSfhIntegrateAccess(config);
-		const resolvedIntegrate = resolveIntegrateTool(config.executor.sfhIntegrateTool, integrateModel, "pi");
-		const integrateTool = resolvedIntegrate.tool;
-		{
-			const ierr = assertSfhToolAllowed(integrateTool, config);
-			if (ierr) {
-				ticket.status = "blocked";
-				ticket.error = resolvedIntegrate.inferred
-					? `integrate: ${ierr}. The tool was inferred from executor.sfhIntegrateModel="${integrateModel}"; set executor.sfhIntegrateTool explicitly.`
-					: `integrate: ${ierr}`;
-				return;
-			}
-		}
-		const spec: FlowSpec = {
-			name: flowName,
-			branches: branches.map((b, i) => ({
-				id: sanitizeId(b.id),
-				tool: b.tool,
-				model: resolveSfhBranchModel(b, config),
-				effort: resolveSfhBranchEffort(b, config),
-				access: branchAccesses[i],
-				prompt: renderBranchPrompt(b, ticket, input.goal),
-			})),
-			integrationPrompt: renderIntegrationPrompt(ticket, input.goal),
-			integrationTool: integrateTool,
-			integrationModel: integrateModel,
-			integrationEffort: resolveSfhIntegrateEffort(config),
-			integrationAccess: integrateAccess,
-			defaultModel: config.executor.sfhModel?.trim() || undefined,
-			defaultEffort: config.executor.sfhEffort?.trim() || undefined,
-			defaultAccess: config.executor.sfhAccess?.trim() || "read",
-			timeoutSec: ex.timeoutSec,
-			maxParallel: ex.maxParallel,
-		};
-
-		const maxAccess = maxAccessLevel(...branchAccesses, integrateAccess);
-		// Fail closed before spawn: no OS sandbox ⇒ write/full must not run or be marked done.
-		// Do not rely on post-hoc git/fs evidence alone for mutating sfh access.
-		const unsup = sfhMutatingAccessUnsupported(maxAccess);
-		if (unsup) {
-			ticket.status = "failed";
-			ticket.error = unsup;
-			ticket.evidence = { processExitCode: 1, actualChangedFiles: [], scopeViolations: [] };
-			return;
-		}
-		const scopeErr = sfhWriteRequiresAllowedScope(maxAccess, ticket.allowed_scope);
-		if (scopeErr) {
-			ticket.status = "failed";
-			ticket.error = scopeErr;
-			ticket.evidence = { processExitCode: 1, actualChangedFiles: [], scopeViolations: [] };
-			return;
-		}
-		// Mutating access is rejected above; keep the flag for defense-in-depth if that gate moves.
-		const needsFsEvidence = maxAccess === "write" || maxAccess === "full";
-
-		const flowFile = writeFlowFile(cwd, runId, generateFlowYaml(spec));
-		const preflight = runSfhPreflight(binary, flowFile, cwd);
-		if (!preflight.ok) {
-			ticket.status = "blocked";
-			ticket.error = [preflight.errorCode, preflight.errorMessage].filter(Boolean).join(": ") || "sfh preflight failed";
-			ticket.evidence = {
-				processExitCode: 1,
-				actualChangedFiles: [],
-				scopeViolations: [],
-				sfh: preflight.schemaVersion === undefined
-					? undefined
-					: {
-							schemaVersion: preflight.schemaVersion,
-							version: preflight.sfhVersion,
-							errorCode: preflight.errorCode,
-					  },
-			};
-			return;
-		}
-
-		const beforeSnap = captureGitSnapshot(cwd);
-		const beforeFs = needsFsEvidence ? captureFilesystemSnapshot(cwd, snapshotLimits) : null;
-		const preError = !beforeSnap.ok
-			? `git evidence failed (pre): ${beforeSnap.error ?? "unknown"}`
-			: beforeFs && !beforeFs.ok
-				? `filesystem evidence failed (pre): ${beforeFs.error ?? "unknown"}`
-				: undefined;
-		if (preError) {
-			ticket.status = "failed";
-			ticket.error = preError;
-			ticket.evidence = { processExitCode: 1, actualChangedFiles: [], scopeViolations: [] };
-			return;
-		}
-
-		const result = await runSfhFlow({
-			binary,
-			flowFile,
-			cwd,
-			signal: hooks.signal,
-			wallClockSec: ex.timeoutSec * Math.max(2, branches.length + 1),
-		});
-
-		const afterSnap = captureGitSnapshot(cwd);
-		const afterFs = needsFsEvidence ? captureFilesystemSnapshot(cwd, snapshotLimits) : null;
-		const gitEv = evaluateGitEvidence(cwd, ticket, beforeSnap, afterSnap, {
-			readOnlyAccess: maxAccess === "read",
-		});
-		const fsEv =
-			beforeFs && afterFs
-				? evaluateFilesystemEvidence(cwd, ticket, beforeFs, afterFs)
-				: { actualChangedFiles: [] as string[], scopeViolations: [] as string[] };
-
-		const evidence: ExecutionEvidence = {
-			processExitCode: result.exitCode,
-			actualChangedFiles: [...new Set([...gitEv.actualChangedFiles, ...fsEv.actualChangedFiles])],
-			scopeViolations: [...new Set([...gitEv.scopeViolations, ...fsEv.scopeViolations])],
-			sfh: result.schemaVersion === undefined
-				? undefined
-				: {
-						schemaVersion: result.schemaVersion,
-						version: result.sfhVersion,
-						runId: result.runId,
-						runDir: result.runDir,
-						errorCode: result.errorCode,
-				  },
-		};
-
-		const fatalError = gitEv.fatalError ?? fsEv.fatalError;
-		if (fatalError) {
-			ticket.status = "failed";
-			ticket.error = fatalError;
-			ticket.evidence = evidence;
-			ticket.report = result.stdout.slice(0, cap);
-			return;
-		}
-
-		const sfhStatus = sfhStatusFromResult(result.exitCode, result.stdout || "", evidence.scopeViolations);
-		if (sfhStatus === "done") {
-			ticket.status = "done";
-			const meta = [
-				"executor: sfh",
-				`access: ${maxAccess}`,
-				result.costUsd !== undefined ? `cost: $${result.costUsd.toFixed(2)}` : "",
-				result.elapsedSec !== undefined ? `elapsed: ${result.elapsedSec}s` : "",
-				result.runId ? `run_id: ${result.runId}` : "",
-				result.runDir ? `run_dir: ${result.runDir}` : "",
-				result.sfhVersion ? `sfh: ${result.sfhVersion} schema=${result.schemaVersion}` : "",
-				`flow: ${flowName}`,
-			]
-				.filter(Boolean)
-				.join("  ");
-			ticket.report = `${meta}\n\n${result.stdout.slice(0, cap)}`;
-			ticket.evidence = evidence;
-			ticket.claim = {
-				claimedStatus: "done",
-				changed_files: evidence.actualChangedFiles,
-				notes: "sfh integration stdout",
-				raw: result.stdout.slice(0, 8000),
-			};
-		} else if (sfhStatus === "partial") {
-			// exit 0 but empty stdout — never treat as done (no evidence)
-			ticket.status = "partial";
-			ticket.error = "sfh exit 0 but empty stdout — not treating as done";
-			ticket.evidence = evidence;
-			ticket.claim = {
-				claimedStatus: "partial",
-				changed_files: evidence.actualChangedFiles,
-				notes: "sfh empty stdout",
-				raw: "",
-			};
-			ticket.report = result.stdout.slice(0, cap);
-		} else {
-			ticket.status = "failed";
-			ticket.error =
-				result.exitCode === 0
-					? `sfh exit 0 but scope/access violations:\n${evidence.scopeViolations.join("\n")}`
-					: [
-							`sfh exit ${result.exitCode}`,
-							result.errorCode,
-							result.errorMessage ?? (result.stderr || result.stdout).slice(-1000),
-					  ]
-							.filter(Boolean)
-							.join(": ");
-			ticket.evidence = evidence;
-			ticket.report = result.stdout.slice(0, cap);
-		}
-	}
-
 	// ---------- 1. Plan ----------
 	notify(hooks, board, "planning: Orchestrator decomposing");
 	if (!(await orchestratorPlan())) {
@@ -1592,128 +1249,122 @@ export async function runSupervisedTask(
 			continue;
 		}
 
-		const isGroup = ticket.execution === "sfh";
-		if (isGroup) {
-			notify(hooks, board, `executing: ${ticket.id} (sfh group)`);
-			await executeGroupTicket(ticket);
-		} else {
-			notify(hooks, board, `executing: ${ticket.id}`);
-			const workerTask = [
-				"Execute this ticket only. Stay inside allowed_scope. End with the required JSON report.",
-				"",
-				"Tools: interceptable built-ins only (read/write/edit/ls/find/grep). bash/shell is NOT available",
-				"and cannot be enabled via alias, args, config, or extensions. Do not claim shell build/test runs —",
-				"controller-side trusted deterministic verify (executor.verifyCommands) owns build/test after you finish.",
-				"",
-				"Git state mutation is forbidden: do NOT git commit, push, branch switch/checkout, reset, stash,",
-				"rebase, merge, or otherwise change HEAD/branch/index state. Worktree edits inside allowed_scope only.",
-				"",
-				"## Ticket",
-				"```json",
-				JSON.stringify(ticket, null, 2),
-				"```",
-				"",
-				`## User request\n${input.goal}`,
-			].join("\n");
+		notify(hooks, board, `executing: ${ticket.id}`);
+		const workerTask = [
+			"Execute this ticket only. Stay inside allowed_scope. End with the required JSON report.",
+			"",
+			"Tools: interceptable built-ins only (read/write/edit/ls/find/grep). bash/shell is NOT available",
+			"and cannot be enabled via alias, args, config, or extensions. Do not claim shell build/test runs —",
+			"controller-side trusted deterministic verify (executor.verifyCommands) owns build/test after you finish.",
+			"",
+			"Git state mutation is forbidden: do NOT git commit, push, branch switch/checkout, reset, stash,",
+			"rebase, merge, or otherwise change HEAD/branch/index state. Worktree edits inside allowed_scope only.",
+			"",
+			"## Ticket",
+			"```json",
+			JSON.stringify(ticket, null, 2),
+			"```",
+			"",
+			`## User request\n${input.goal}`,
+		].join("\n");
 
-			// Native implementation workers: scope-guard only (--no-extensions), strict built-in
-			// tools, then controller-side trusted verify. FS monitor covers ignored/parent writes.
-			const beforeFs = captureFilesystemSnapshot(cwd, snapshotLimits);
-			const beforeGit = captureGitSnapshot(cwd);
-			const preError = !beforeFs.ok
-				? `filesystem evidence failed (pre): ${beforeFs.error ?? "unknown"}`
-				: !beforeGit.ok
-					? `git evidence failed (pre): ${beforeGit.error ?? "unknown"}`
-					: undefined;
-			if (preError) {
-				// The Worker never started, so this is an environment failure and not
-				// its fault. Inconclusive (never done), but not charged to the ticket.
-				ticket.status = "partial";
-				ticket.error = preError;
+		// Native implementation workers: scope-guard only (--no-extensions), strict built-in
+		// tools, then controller-side trusted verify. FS monitor covers ignored/parent writes.
+		const beforeFs = captureFilesystemSnapshot(cwd, snapshotLimits);
+		const beforeGit = captureGitSnapshot(cwd);
+		const preError = !beforeFs.ok
+			? `filesystem evidence failed (pre): ${beforeFs.error ?? "unknown"}`
+			: !beforeGit.ok
+				? `git evidence failed (pre): ${beforeGit.error ?? "unknown"}`
+				: undefined;
+		if (preError) {
+			// The Worker never started, so this is an environment failure and not
+			// its fault. Inconclusive (never done), but not charged to the ticket.
+			ticket.status = "partial";
+			ticket.error = preError;
+			ticket.evidence = {
+				inconclusive: true,
+				processExitCode: 1,
+				actualChangedFiles: [],
+				scopeViolations: [],
+				verify: unsetVerifyEvidence("skipped: pre-evidence failed"),
+			};
+		} else {
+			const run = await runRole(worker, workerTask, {
+				cwd,
+				signal: hooks.signal,
+				timeoutSec: workerTimeoutSec,
+				outputCap: cap,
+				onProgress: hooks.onActivity,
+				// Discovery off; only the harness scope-guard extension is loaded.
+				extraArgs: ["--no-extensions", "-e", scopeGuardPath()],
+				extraEnv: {
+					PI_META_LOOP_ALLOWED_SCOPE: JSON.stringify(ticket.allowed_scope ?? []),
+					PI_META_LOOP_FORBIDDEN: JSON.stringify(ticket.forbidden ?? []),
+					PI_META_LOOP_CWD: cwd,
+				},
+			});
+			addUsage(usage, run.usage);
+			const afterFs = captureFilesystemSnapshot(cwd, snapshotLimits);
+			const afterGit = captureGitSnapshot(cwd);
+			const fsEv = evaluateFilesystemEvidence(cwd, ticket, beforeFs, afterFs);
+			// Scoped native workers have no shell, so git state changes here came
+			// from some other process in this worktree.
+			const gitEv = evaluateGitEvidence(cwd, ticket, beforeGit, afterGit, { gitCapableWorker: false });
+			const claim = parseWorkerClaim(run.output);
+			const evidence: ExecutionEvidence = {
+				processExitCode: run.exitCode,
+				actualChangedFiles: [...new Set([...gitEv.actualChangedFiles, ...fsEv.actualChangedFiles])],
+				scopeViolations: [...new Set([...gitEv.scopeViolations, ...fsEv.scopeViolations])],
+				claimedStatus: claim.claimedStatus,
+			};
+			ticket.report = run.output.slice(0, 4000);
+			const fatal = fsEv.fatalError
+				? { error: fsEv.fatalError, attribution: fsEv.fatalAttribution }
+				: gitEv.fatalError
+					? { error: gitEv.fatalError, attribution: gitEv.fatalAttribution }
+					: null;
+			if (fatal) {
+				// External interference only excuses a ticket that is otherwise clean.
+				// A scope violation or a non-zero exit is the ticket's own problem and
+				// still counts, whatever else went wrong at the same time.
+				const workerAtFault =
+					fatal.attribution !== "external" ||
+					evidence.scopeViolations.length > 0 ||
+					evidence.processExitCode !== 0;
+				ticket.status = workerAtFault ? "failed" : "partial";
+				ticket.error = fatal.error;
+				ticket.claim = claim;
 				ticket.evidence = {
-					inconclusive: true,
-					processExitCode: 1,
-					actualChangedFiles: [],
-					scopeViolations: [],
-					verify: unsetVerifyEvidence("skipped: pre-evidence failed"),
+					...evidence,
+					inconclusive: !workerAtFault,
+					verify: unsetVerifyEvidence("skipped: fatal evidence error"),
 				};
 			} else {
-				const run = await runRole(worker, workerTask, {
-					cwd,
-					signal: hooks.signal,
-					timeoutSec: workerTimeoutSec,
-					outputCap: cap,
-					onProgress: hooks.onActivity,
-					// Discovery off; only the harness scope-guard extension is loaded.
-					extraArgs: ["--no-extensions", "-e", scopeGuardPath()],
-					extraEnv: {
-						PI_META_LOOP_ALLOWED_SCOPE: JSON.stringify(ticket.allowed_scope ?? []),
-						PI_META_LOOP_FORBIDDEN: JSON.stringify(ticket.forbidden ?? []),
-						PI_META_LOOP_CWD: cwd,
-					},
+				// Controller verify is model-independent and required before done.
+				// Skip when the worker failed, scope broke, or verify runs once at the end.
+				const shouldVerify =
+					run.exitCode === 0 &&
+					evidence.scopeViolations.length === 0 &&
+					!hooks.signal?.aborted &&
+					verifyMode !== "final";
+				const verify = shouldVerify
+					? await runVerify()
+					: unsetVerifyEvidence(
+							run.exitCode !== 0
+								? "skipped: worker process exit non-zero"
+								: evidence.scopeViolations.length
+									? "skipped: scope violations"
+									: hooks.signal?.aborted
+										? "skipped: aborted"
+										: "deferred: executor.verifyMode=final",
+					  );
+				if (verifyBaseline) verify.baselineStatus = verifyBaseline.status;
+				verify.preExisting = isPreExistingFailure(verify, verifyBaseline);
+				finalizeFromEvidence(ticket, claim, { ...evidence, verify }, {
+					baseline: verifyBaseline,
+					mode: verifyMode,
 				});
-				addUsage(usage, run.usage);
-				const afterFs = captureFilesystemSnapshot(cwd, snapshotLimits);
-				const afterGit = captureGitSnapshot(cwd);
-				const fsEv = evaluateFilesystemEvidence(cwd, ticket, beforeFs, afterFs);
-				// Scoped native workers have no shell, so git state changes here came
-				// from some other process in this worktree.
-				const gitEv = evaluateGitEvidence(cwd, ticket, beforeGit, afterGit, { gitCapableWorker: false });
-				const claim = parseWorkerClaim(run.output);
-				const evidence: ExecutionEvidence = {
-					processExitCode: run.exitCode,
-					actualChangedFiles: [...new Set([...gitEv.actualChangedFiles, ...fsEv.actualChangedFiles])],
-					scopeViolations: [...new Set([...gitEv.scopeViolations, ...fsEv.scopeViolations])],
-					claimedStatus: claim.claimedStatus,
-				};
-				ticket.report = run.output.slice(0, 4000);
-				const fatal = fsEv.fatalError
-					? { error: fsEv.fatalError, attribution: fsEv.fatalAttribution }
-					: gitEv.fatalError
-						? { error: gitEv.fatalError, attribution: gitEv.fatalAttribution }
-						: null;
-				if (fatal) {
-					// External interference only excuses a ticket that is otherwise clean.
-					// A scope violation or a non-zero exit is the ticket's own problem and
-					// still counts, whatever else went wrong at the same time.
-					const workerAtFault =
-						fatal.attribution !== "external" ||
-						evidence.scopeViolations.length > 0 ||
-						evidence.processExitCode !== 0;
-					ticket.status = workerAtFault ? "failed" : "partial";
-					ticket.error = fatal.error;
-					ticket.claim = claim;
-					ticket.evidence = {
-						...evidence,
-						inconclusive: !workerAtFault,
-						verify: unsetVerifyEvidence("skipped: fatal evidence error"),
-					};
-				} else {
-					// Controller verify is model-independent and required before done.
-					// Skip when the worker failed, scope broke, or verify runs once at the end.
-					const shouldVerify =
-						run.exitCode === 0 &&
-						evidence.scopeViolations.length === 0 &&
-						!hooks.signal?.aborted &&
-						verifyMode !== "final";
-					const verify = shouldVerify
-						? await runVerify()
-						: unsetVerifyEvidence(
-								run.exitCode !== 0
-									? "skipped: worker process exit non-zero"
-									: evidence.scopeViolations.length
-										? "skipped: scope violations"
-										: hooks.signal?.aborted
-											? "skipped: aborted"
-											: "deferred: executor.verifyMode=final",
-						  );
-					if (verifyBaseline) verify.baselineStatus = verifyBaseline.status;
-					verify.preExisting = isPreExistingFailure(verify, verifyBaseline);
-					finalizeFromEvidence(ticket, claim, { ...evidence, verify }, {
-						baseline: verifyBaseline,
-						mode: verifyMode,
-					});
-				}
 			}
 		}
 

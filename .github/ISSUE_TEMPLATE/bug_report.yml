@@ -19,15 +19,15 @@ body:
     id: versions
     attributes:
       label: Versions
-      description: Node, pi, pi-meta-loop, and SFH (if installed).
-      placeholder: "node 22.19.0, pi 0.83.1, pi-meta-loop 0.3.0-rc.1, sfh 1.4.0"
+      description: Node, pi, and pi-meta-loop.
+      placeholder: "node 22.19.0, pi 0.84.2, pi-meta-loop 0.3.0-rc.2"
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
       label: What you expected, and what happened
-      description: Include the run status, board phase, and the stable SFH error code if there is one.
+      description: Include the run status and the board phase.
     validations:
       required: true
   - type: textarea

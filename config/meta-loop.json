@@ -22,20 +22,8 @@
 		"maxConsecutiveFailures": 2
 	},
 	"executor": {
-		"sfhEnabled": true,
-		"sfhBinary": "sfh",
 		"timeoutSec": 1800,
 		"maxParallel": 4,
-		"sfhModel": "",
-		"sfhIntegrateModel": "",
-		"sfhToolModels": {},
-		"sfhEffort": "",
-		"sfhToolEfforts": {},
-		"sfhIntegrateEffort": "",
-		"sfhAccess": "read",
-		"sfhToolAccess": {},
-		"sfhIntegrateAccess": "read",
-		"sfhIntegrateTool": "",
 		"verifyMode": "per-ticket"
 	},
 	"escalation": {
@@ -55,5 +43,5 @@
 		"perTaskOutputCap": 51200,
 		"maxSupervisions": 12
 	},
-	"notes": "Native workers use strict built-ins + --no-extensions + scope-guard. done requires a user-approved verify profile or direct verifyCommands, and approving one authorizes running the target repository's own code (see SECURITY.md). sfh write/full requires an OS sandbox. Project config can only narrow capabilities and cannot choose role models. Set limits.scopeCeiling in user config to bound ticket allowed_scope."
+	"notes": "Native workers use strict built-ins + --no-extensions + scope-guard. done requires a user-approved verify profile or direct verifyCommands, and approving one authorizes running the target repository's own code (see SECURITY.md). Project config can only narrow capabilities and cannot choose role models. Set limits.scopeCeiling in user config to bound ticket allowed_scope."
 }

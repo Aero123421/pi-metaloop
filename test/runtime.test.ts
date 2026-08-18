@@ -7,11 +7,8 @@ import {
 	formatBoardForSupervisor,
 	buildPrimarySummary,
 	resolveTerminalPhase,
-	sfhWriteRequiresAllowedScope,
-	sfhMutatingAccessUnsupported,
 } from "../src/runtime.ts";
 import { runElapsed, runStatusFromPhase } from "../src/board-store.ts";
-import { generateFlowYaml } from "../src/sfh-exec.ts";
 import type { TaskBoard, Ticket } from "../src/types.ts";
 import { evaluateTriggers } from "../src/triggers.ts";
 import { defaultConfig } from "../src/config.ts";
@@ -30,66 +27,7 @@ function baseTicket(over: Partial<Ticket> = {}): Ticket {
 	};
 }
 
-describe("sfh success path contract", () => {
-	it("generateFlowYaml forces read access fields when provided", () => {
-		const y = generateFlowYaml({
-			name: "meta-loop-x",
-			timeoutSec: 60,
-			maxParallel: 2,
-			defaultAccess: "read",
-			branches: [{ id: "a", tool: "pi", access: "read", prompt: "p" }],
-			integrationPrompt: "i {{steps.fanout.outputs}}",
-			integrationAccess: "read",
-		});
-		assert.match(y, /access: read/);
-		assert.doesNotMatch(y, /access: write/);
-	});
-});
-
 describe("ticket validation", () => {
-	it("rejects sfh without branches", () => {
-		const err = validateTicket(baseTicket({ execution: "sfh" }));
-		assert.ok(err);
-	});
-	it("rejects sfh without integration.acceptance", () => {
-		const err = validateTicket(
-			baseTicket({
-				execution: "sfh",
-				branches: [{ id: "a", prompt: "x" }],
-			}),
-		);
-		assert.ok(err);
-	});
-	it("accepts valid sfh ticket", () => {
-		const err = validateTicket(
-			baseTicket({
-				execution: "sfh",
-				branches: [{ id: "a", prompt: "x" }],
-				integration: { acceptance: ["ok"] },
-			}),
-		);
-		assert.equal(err, null);
-	});
-	it("rejects sfh write/full without OS sandbox at plan and execute gates", () => {
-		for (const access of ["write", "full"] as const) {
-			const err = validateTicket(
-				baseTicket({
-					execution: "sfh",
-					allowed_scope: ["src/**"],
-					branches: [{ id: "a", prompt: "x", access }],
-					integration: { acceptance: ["ok"] },
-				}),
-			);
-			assert.ok(err, access);
-			assert.match(err!, /sandbox|write\/full|unsupported/i, access);
-		}
-		assert.ok(sfhMutatingAccessUnsupported("write"));
-		assert.ok(sfhMutatingAccessUnsupported("full"));
-		assert.equal(sfhMutatingAccessUnsupported("read"), null);
-		// Defense-in-depth: empty scope still rejected if mutating access ever reached this gate.
-		assert.ok(sfhWriteRequiresAllowedScope("full", []));
-		assert.equal(sfhWriteRequiresAllowedScope("full", ["src/**"]), null);
-	});
 	// P0 fail-closed: empty write scope must not run as native implementation work
 	it("rejects native ticket with empty allowed_scope", () => {
 		const err = validateTicket(baseTicket({ execution: "native", allowed_scope: [] }));

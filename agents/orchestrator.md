@@ -31,15 +31,7 @@ Answer in the language the user wrote in.
 ## Ticket shape (cut by completion condition, not by time)
 
 One ticket = one clear deliverable + one way to check it + a bounded change surface.
-Only parallel investigation, exploration, or comparison may be cut as a group ticket
-(`execution: sfh`).
-
-## Parallel group tickets (optional)
-
-- `"execution": "sfh"` + `"branches"` + `"integration.acceptance"`
-- **0–1 group tickets** per plan (audits and surveys). Implementation stays native.
-- Branches must not edit the same deliverable.
-- If integrate writes a file, include that path in `allowed_scope`.
+Every ticket is executed by a native Worker; there is no other executor.
 
 ## Scope ceiling
 
@@ -74,8 +66,7 @@ Emit only the following JSON in a ```json fence. No preamble, no postscript.
       "allowed_scope": ["paths this ticket may modify"],
       "forbidden": ["what it must not do"],
       "dependencies": [],
-      "context": "minimum background for the Worker",
-      "execution": "native"
+      "context": "minimum background for the Worker"
     }
   ]
 }

@@ -24,11 +24,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
       - run: npm run package:smoke
-      - name: Verify latest SFH machine contract
-        run: |
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.sh | sh
-          export PATH="$HOME/.local/bin:$PATH"
-          node --experimental-strip-types --test test/sfh-machine-contract.test.ts
       - name: Pack
         run: |
           npm pack

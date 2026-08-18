@@ -2,7 +2,7 @@
 
 **Status: release candidate; see `package.json` for the exact version.** Adaptive supervised orchestration for [pi](https://github.com/earendil-works/pi).
 
-Short tasks stay lightweight. Long tasks can use a supervised layer (Orchestrator + Supervisor + Workers / sfh) with **fail-closed initial audit**, **evidence-based completion**, and **capability separation** (not prompt-only).
+Short tasks stay lightweight. Long tasks can use a supervised layer (Orchestrator + Supervisor + Workers) with **fail-closed initial audit**, **evidence-based completion**, and **capability separation** (not prompt-only).
 
 [日本語 README](./README.ja.md)
 
@@ -20,22 +20,10 @@ Short tasks stay lightweight. Long tasks can use a supervised layer (Orchestrato
 ## Requirements
 
 - [pi](https://github.com/earendil-works/pi) (this is a pi extension)
-- **[sfh (SimpleFlowHarness)](https://github.com/Aero123421/SimpleFlowHarness) — optional**, and needed only for group tickets (`execution: "sfh"`), which run parallel branch groups with an integration contract. Everything else works without it.
-
-```bash
-# Windows PowerShell
-irm https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.ps1 | iex
-# macOS / Linux
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Aero123421/SimpleFlowHarness/releases/latest/download/sfh-installer.sh | sh
-```
-
-Without sfh, group tickets are blocked with install instructions and everything else runs normally. `/ml-doctor` reports a missing sfh as information, not a problem.
-
 | Dependency | Supported contract |
 |---|---|
 | Node.js | `>=22.19.0` |
 | pi / pi-ai | `^0.83.0` |
-| SFH (optional) | `>=1.4.0`, machine schema `1` (`sfh run/preflight --json`) |
 
 ## How it works
 
@@ -140,7 +128,7 @@ Explicitly invoke:
 /skill:meta-loop-setup
 ```
 
-Interactive wizard: scope, role models, sfh settings, an approved verify profile, and standards. Writes `~/.pi/agent/meta-loop/` and/or `.pi/meta-loop/`.
+Interactive wizard: scope, role models, an approved verify profile, and standards. Writes `~/.pi/agent/meta-loop/` and/or `.pi/meta-loop/`.
 
 ## Configuration
 
@@ -172,38 +160,6 @@ Standards live next to config:
 ```
 
 Empty string = inherit pi's default model. Format is the same as pi `--model`.
-
-### sfh models (parallel group branches)
-
-sfh steps accept a `model` field (tool-dependent). Resolution order for each branch:
-
-1. `branches[].model` on the ticket (Orchestrator override)
-2. `executor.sfhToolModels[tool]` (e.g. different model for `pi` vs `opencode`)
-3. `executor.sfhModel` (global sfh default)
-4. for `tool: pi` only — fall back to `roles.worker.model`
-
-Integrate step uses `executor.sfhIntegrateModel` → `sfhModel` → `roles.worker.model`.
-
-```json
-{
-  "executor": {
-    "sfhEnabled": true,
-    "sfhBinary": "sfh",
-    "timeoutSec": 1800,
-    "maxParallel": 4,
-    "sfhModel": "",
-    "sfhIntegrateModel": "",
-    "sfhToolModels": {
-      "pi": "provider/model-id",
-      "opencode": "",
-      "codex": "",
-      "claude": ""
-    }
-  }
-}
-```
-
-See `examples/user-meta-loop.config.example.json` and `examples/project-meta-loop.config.example.json`.
 
 ### Trusted verify profiles
 
@@ -266,8 +222,7 @@ Other knobs:
 - `enabled` — kill switch
 - `roles.<role>.tools` — tools available to the role
 - `supervisor.*` — automatic supervision hooks
-- `executor.*` — sfh delegation and models
-- `executor.sfhAllowedTools` — omitted is unrestricted, `[]` is deny-all, non-empty is an allowlist
+- `executor.*` — worker timeout, parallelism, verify mode
 - `executor.verifyProfiles` / `verifyProfile` — user-approved argv and project selection
 - `escalation.enabled` — soft long-task nudge (default true)
 - `escalation.toolCallThreshold` — default 20
@@ -279,28 +234,6 @@ Other knobs:
 - `limits.maxSupervisions` — mid-run Supervisor audit budget (default 12; initial/final always run)
 - `limits.scopeCeiling` — harness ceiling on ticket `allowed_scope`
 - `allowProjectModelOverride` — let project config choose role models (default false)
-- `executor.sfhIntegrateTool` — explicit sfh integrate tool instead of inferring one from the model id
-
-## Group tickets (parallel branches + integration contract)
-
-The Orchestrator may cut research/exploration/comparison work into a single **group ticket** instead of several tickets:
-
-```json
-{
-  "id": "research-01",
-  "execution": "sfh",
-  "goal": "OAuth approaches: research and codebase exploration",
-  "branches": [
-    { "id": "web", "tool": "opencode", "prompt": "library comparison..." },
-    { "id": "code", "tool": "pi", "prompt": "existing auth flow survey..." }
-  ],
-  "integration": { "acceptance": ["all branches covered", "contradictions listed", "sources noted"] }
-}
-```
-
-The runtime generates a `flow.yaml`, checks it with `sfh preflight --json`, then runs `sfh run --json` with `PI_META_LOOP_DEPTH=1`. Machine schema `1`, run ID, run directory, result, and stable error code are validated directly instead of inferred from `.sfh/runs` ordering.
-
-Implementation tickets stay native (Worker pi subprocesses). Groups are for parallelizable investigation work only.
 
 ## Commands & UX
 
@@ -311,14 +244,12 @@ Implementation tickets stay native (Worker pi subprocesses). Groups are for para
 - `/verdicts` — Supervisor verdict history
 - `/ml-stop` — abort the active supervised run
 - `/ml-runs` — list on-disk runs under `.pi/meta-loop/runs/`
-- `/ml-doctor` — native-done gate and SFH machine/preflight diagnostics
-- `/sfh` — list/inspect sfh runs; `/sfh stop` stops the newest
-- While supervised: **unified colored panel** (meta-loop + sfh) below the editor + rich footer
+- `/ml-doctor` — native-done gate and the effective capability envelope
+- While supervised: **flat colored panel** below the editor + rich footer
 - `/ml-ui` — cycle panel detail `compact|normal|full` (or `show`/`hide`); shortcut `ctrl+shift+m`
 - Finished runs **auto-hide** after ~90s (no more sticky 28m “stopped” ghosts); `/tasks` forces show
 - Role subprocess tasks are sent on **stdin** (avoids Windows `ENAMETOOLONG`)
 - Soft escalation: many tool calls / file touches / writes, or a long user brief, nudges once toward `orchestrate` (never forces it)
-- sfh flows also get footer + widget; `stuck` always notifies
 
 Internal play-by-play stays in the widget. Chat gets plan, decisions that need you, and the final summary.
 
@@ -337,8 +268,8 @@ npm test
 - Build/test is **controller-side deterministic verify** (`verifyProfiles` argv lists, no shell). Unset, failed, or timed-out verify **forbids** native `done` (recorded on `evidence.verify`).
 - **A verify profile authorizes running the target repository's own code.** `["npm","test"]` executes whatever that repository's `package.json` and test files define. The profile system fixes the *command*, not the payload behind it. Keep profiles to repositories you would run tests in by hand, and prefer selecting them per project (`executor.verifyProfile`) over a global `verifyCommands`.
 - `limits.scopeCeiling` bounds every ticket's `allowed_scope`. Without it the write surface is chosen entirely by the Orchestrator's plan.
-- sfh parallel groups are **read-only review** without an OS sandbox. `write`/`full` is refused at plan/execute (not marked done via post-hoc evidence alone), and reported at startup and by `/ml-doctor`.
-- Project config may only **narrow** capabilities relative to user/defaults: it cannot raise sfh access, swap sfhBinary, expand tool allow-lists, introduce verify argv, or **choose role models** (opt in with `allowProjectModelOverride`).
+- A worker whose executor the harness cannot intercept is refused. Scope is enforced at tool-call time, so an executor without that interception could only be checked by post-hoc evidence, which is a detection backstop and not an enforcement mechanism.
+- Project config may only **narrow** capabilities relative to user/defaults: it cannot expand tool allow-lists, introduce verify argv, or **choose role models** (opt in with `allowProjectModelOverride`).
 - Project `standards.md` is treated as **untrusted criteria data** in prompts.
 - Generated flows under `.pi/meta-loop/flows/` may contain user text — gitignore them; do not commit secrets.
 - Run directories hold prompts and model output. They are pruned to the newest 20.
@@ -362,6 +293,8 @@ npm test
 - [x] 0.3.0-rc.1 — verify profiles, `/ml-doctor`, SFH machine envelope, release contract
 - [x] 0.3.0-rc.2 — evidence attribution, verify baseline + `verifyMode`, `limits.scopeCeiling`,
       audit budget, English role prompts
+- [x] 0.4.0 — sfh executor removed; the extension runs standalone. Multi-CLI workers
+      (pi / codex / claude / cursor / grok / agy / opencode) are tracked in issue #4
 - [ ] Phase 3 — harness diagnosis (repeated failures → rules/skills/prompts weaknesses)
 - [ ] Phase 4 — evolution loop (logs + scores, external improver) — research-grade, optional
 

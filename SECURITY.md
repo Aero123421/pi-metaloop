@@ -10,11 +10,11 @@ Please use GitHub private vulnerability reporting for this repository. Do not in
 
 ## Trust boundary
 
-pi-meta-loop runs `pi`, configured controller verify commands, and SFH with the current user's OS permissions. Native Workers receive only interceptable built-in tools and cannot use bash. SFH groups are read-only unless a future OS sandbox can enforce scoped writes.
+pi-meta-loop runs `pi` and the configured controller verify commands with the current user's OS permissions. Native Workers receive only interceptable built-in tools and cannot use bash.
 
 Role subprocesses inherit the host environment because model CLIs need provider credentials. Run artifacts may contain prompts, paths, model output, and command output; `.pi/meta-loop/` is ignored by Git, but remains local sensitive data. Run directories are pruned to the newest 20. `/ml-doctor` does not print environment values.
 
-Project config and standards are untrusted inputs. Project config may narrow capabilities and select a user-approved verify profile, but cannot add verify argv, raise SFH access, replace the SFH binary, expand tool allowlists, or choose role models (`allowProjectModelOverride` is an explicit user opt-in).
+Project config and standards are untrusted inputs. Project config may narrow capabilities and select a user-approved verify profile, but cannot add verify argv, expand tool allowlists, or choose role models (`allowProjectModelOverride` is an explicit user opt-in).
 
 ## Approving a verify profile runs the target repository's code
 
