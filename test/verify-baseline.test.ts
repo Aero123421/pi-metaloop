@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-	AWAITING_FINAL_VERIFY,
+	computeRunVerification,
+	DEFERRED_FINAL_VERIFY,
 	finalizeFromEvidence,
 } from "../src/runtime.ts";
 import { isPreExistingFailure, toVerifyBaseline, verifySignature } from "../src/verify.ts";
@@ -44,7 +45,7 @@ describe("verify baseline attribution", () => {
 		const t = ticket();
 		const baseline = toVerifyBaseline(failedNpmTest);
 		finalizeFromEvidence(t, claimDone, evidence(failedNpmTest), { baseline });
-		assert.equal(t.status, "partial");
+		assert.equal(t.status, "completed");
 		assert.match(t.error ?? "", /already failing when the run started/);
 	});
 
@@ -60,11 +61,23 @@ describe("verify baseline attribution", () => {
 		assert.equal(t.status, "failed");
 	});
 
-	it("pre-existing attribution never authorizes done", () => {
+	it("pre-existing attribution never authorizes a verified run", () => {
 		const t = ticket();
 		const baseline = toVerifyBaseline(failedNpmTest);
 		finalizeFromEvidence(t, claimDone, evidence(failedNpmTest), { baseline });
-		assert.notEqual(t.status, "done");
+		// The ticket is not blamed, and the run is still not verified: an already-red
+		// baseline means nothing about this run can be attributed either way.
+		const board = {
+			goal: "g",
+			planSummary: "",
+			openQuestions: [],
+			phase: "completed" as const,
+			reviewCount: 0,
+			tickets: [t],
+		};
+		const v = computeRunVerification(board, { verifyConfigured: true, verifyMode: "per-ticket" });
+		assert.equal(v.status, "unverified");
+		assert.match(v.detail, /baseline was already failing/);
 	});
 
 	it("requires a baseline that actually failed", () => {
@@ -82,10 +95,10 @@ describe("verify baseline attribution", () => {
 		assert.equal(verifySignature({ status: "passed" }), undefined);
 	});
 
-	it("an aborted verify is inconclusive, not a ticket failure", () => {
+	it("an aborted verify is not a ticket failure", () => {
 		const t = ticket();
 		finalizeFromEvidence(t, claimDone, evidence({ status: "aborted", reason: "stopped" }));
-		assert.equal(t.status, "partial");
+		assert.equal(t.status, "completed");
 	});
 
 	it("a timeout is still charged to the ticket", () => {
@@ -108,15 +121,17 @@ describe("verifyMode=final defers the gate", () => {
 			evidence({ status: "unset", reason: "deferred: executor.verifyMode=final" }),
 			{ mode: "final" },
 		);
-		assert.equal(t.status, "partial");
-		assert.equal(t.error, AWAITING_FINAL_VERIFY);
+		// Completed by evidence; the shared gate has simply not run yet.
+		assert.equal(t.status, "completed");
+		assert.equal(t.evidence?.verify?.reason, DEFERRED_FINAL_VERIFY);
 	});
 
 	it("per-ticket mode keeps the original unset message", () => {
 		const t = ticket();
 		finalizeFromEvidence(t, claimDone, evidence({ status: "unset", reason: "not configured" }));
-		assert.equal(t.status, "partial");
-		assert.notEqual(t.error, AWAITING_FINAL_VERIFY);
+		// Unchecked is not half-done: the run-level verification carries that fact.
+		assert.equal(t.status, "completed");
+		assert.notEqual(t.evidence?.verify?.reason, DEFERRED_FINAL_VERIFY);
 	});
 
 	it("deferral never turns a scope violation into a pending promotion", () => {
@@ -132,7 +147,8 @@ describe("verifyMode=final defers the gate", () => {
 			},
 			{ mode: "final" },
 		);
+		// A scope violation is the ticket's own fault and outranks any pending gate.
 		assert.equal(t.status, "failed");
-		assert.notEqual(t.error, AWAITING_FINAL_VERIFY);
+		assert.notEqual(t.evidence?.verify?.reason, DEFERRED_FINAL_VERIFY);
 	});
 });

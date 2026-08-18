@@ -8,8 +8,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { TaskBoard, UsageStats, Verdict } from "./types.ts";
 
-export type RunStatus = "running" | "done" | "error" | "stopped" | "incomplete";
-export const BOARD_SCHEMA_VERSION = 1;
+export type RunStatus = "running" | "completed" | "error" | "stopped" | "incomplete";
+export const BOARD_SCHEMA_VERSION = 2;
 
 export interface PersistedRun {
 	/** Missing means a legacy 0.2.x board; future unknown versions are rejected. */
@@ -118,10 +118,33 @@ export function isValidRunId(runId: string): boolean {
 /** Map board phase (+ abort) to persisted run status. */
 export function runStatusFromPhase(phase: string, aborted: boolean): RunStatus {
 	if (aborted || phase === "stopped" || phase === "plan_rejected") return "stopped";
-	if (phase === "done") return "done";
+	if (phase === "completed") return "completed";
 	if (phase === "incomplete") return "incomplete";
 	if (phase === "plan_failed" || phase === "degraded") return "error";
 	return "error";
+}
+
+/**
+ * Read a board written before `done` became `completed`.
+ *
+ * In-memory only: the next write stamps v2. Nothing is invented — a v1 board has no
+ * run-level verification, and guessing one would be worse than leaving it absent.
+ */
+export function migrateBoardV1(run: PersistedRun): PersistedRun {
+	const tickets = (run.board?.tickets ?? []).map((t) =>
+		t.status === ("done" as string) ? { ...t, status: "completed" as const } : t,
+	);
+	const phase =
+		run.board?.phase === ("done" as string)
+			? ("completed" as const)
+			: run.board?.phase === ("revision" as string)
+				? ("planning" as const)
+				: run.board?.phase;
+	return {
+		...run,
+		status: run.status === ("done" as string) ? "completed" : run.status,
+		board: { ...run.board, tickets, phase },
+	};
 }
 
 /** Elapsed that freezes after finishedAt/updatedAt when not running. */
@@ -467,7 +490,11 @@ export function readRun(cwd: string, runId: string): PersistedRun | null {
 		const raw = fs.readFileSync(file, "utf-8");
 		const parsed = JSON.parse(raw) as PersistedRun;
 		if (!parsed || typeof parsed !== "object") return null;
-		if (parsed.board_schema_version !== undefined && parsed.board_schema_version !== BOARD_SCHEMA_VERSION) return null;
+		const version = parsed.board_schema_version;
+		// v1 boards are readable — the vocabulary changed, not the shape. A version we
+		// have never heard of still fails closed.
+		if (version === undefined || version === 1) return migrateBoardV1(parsed);
+		if (version !== BOARD_SCHEMA_VERSION) return null;
 		return parsed;
 	} catch {
 		return null;
@@ -524,7 +551,7 @@ export function ticketCounts(board: TaskBoard): {
 	const count = (s: string) => tickets.filter((t) => t.status === s).length;
 	return {
 		total: tickets.length,
-		done: count("done"),
+		done: count("completed"),
 		running: count("running"),
 		pending: count("pending"),
 		failed: count("failed") + count("cancelled"),

@@ -125,22 +125,20 @@ describe("role tool ceilings", () => {
 });
 
 describe("project-only narrowing", () => {
-	it("accepts lower executor timeoutSec and maxParallel", () => {
+	it("accepts a lower executor timeoutSec", () => {
 		const cfg = buildConfigFromLayers(
-			[executorLayer({ timeoutSec: 1_200, maxParallel: 8 })],
-			[executorLayer({ timeoutSec: 600, maxParallel: 3 })],
+			[executorLayer({ timeoutSec: 1_200 })],
+			[executorLayer({ timeoutSec: 600 })],
 		);
 		assert.equal(cfg.executor.timeoutSec, 600);
-		assert.equal(cfg.executor.maxParallel, 3);
 	});
 
-	it("rejects higher executor timeoutSec and maxParallel", () => {
+	it("rejects a higher executor timeoutSec", () => {
 		const cfg = buildConfigFromLayers(
-			[executorLayer({ timeoutSec: 600, maxParallel: 3 })],
-			[executorLayer({ timeoutSec: 1_200, maxParallel: 8 })],
+			[executorLayer({ timeoutSec: 600 })],
+			[executorLayer({ timeoutSec: 1_200 })],
 		);
 		assert.equal(cfg.executor.timeoutSec, 600);
-		assert.equal(cfg.executor.maxParallel, 3);
 	});
 
 	it("can narrow task/output limits but cannot change the audit budget", () => {

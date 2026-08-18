@@ -7,7 +7,7 @@
  */
 import { spawnSync } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { StringEnum } from "@earendil-works/pi-ai";
+import { StringEnum, type Usage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
 	acquireOwnerLock,
@@ -43,6 +43,7 @@ import {
 } from "./escalation.ts";
 import { decideAbortWait, waitForSettlement } from "./orchestration-lifecycle.ts";
 import {
+	buildChatDigest,
 	noApproverReason,
 	runSupervisedTask,
 	type ApprovalDecision,
@@ -60,7 +61,7 @@ import {
 	ticketIcon,
 	type PanelDetail,
 } from "./tui-panel.ts";
-import type { TaskBoard, Verdict } from "./types.ts";
+import type { TaskBoard, UsageStats, Verdict } from "./types.ts";
 
 const STATUS_KEY = "meta-loop";
 const WIDGET_KEY = "meta-loop-panel";
@@ -94,6 +95,28 @@ interface ActiveOrchestration {
 	lock: { refresh: () => boolean; release: () => void } | null;
 	/** Set while the run is parked waiting for a human to review the plan. */
 	pendingApproval: { request: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
+}
+
+/** Empty aggregate for runs persisted before usage was recorded. */
+function emptyUsage(): UsageStats {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+}
+
+/**
+ * Report the run's spend to pi so it lands in the session totals.
+ *
+ * The harness spawns its own models; without this the cost of an orchestrated run is
+ * invisible in the very place a user looks for what a turn cost.
+ */
+function toPiUsage(u: UsageStats): Usage {
+	return {
+		input: u.input,
+		output: u.output,
+		cacheRead: u.cacheRead,
+		cacheWrite: u.cacheWrite,
+		totalTokens: u.input + u.output + u.cacheRead + u.cacheWrite,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: u.cost },
+	};
 }
 
 function formatLockHolder(holder: OwnerLockHolder | null | undefined): string {
@@ -485,7 +508,11 @@ export default function (pi: ExtensionAPI) {
 			signal?: AbortSignal;
 		},
 		ctx: ExtensionContext,
-	): Promise<{ content: { type: "text"; text: string }[]; details: Record<string, unknown> }> => {
+	): Promise<{
+		content: { type: "text"; text: string }[];
+		details: Record<string, unknown>;
+		usage?: Usage;
+	}> => {
 		const config = loadConfig(ctx.cwd);
 		if (!config.enabled) {
 			return {
@@ -748,7 +775,7 @@ export default function (pi: ExtensionAPI) {
 					summary: result.summary,
 					usage: result.usage,
 					error:
-						terminal === "done" || terminal === "stopped"
+						terminal === "completed" || terminal === "stopped"
 							? undefined
 							: result.board.planSummary?.startsWith("[")
 								? result.board.planSummary.slice(0, 500)
@@ -761,7 +788,7 @@ export default function (pi: ExtensionAPI) {
 				if (canUseOriginSession(orch) && sessionUi?.hasUI) {
 					sessionUi.ui.notify(
 						`meta-loop ${terminal}: ${result.board.phase} (✓${counts.done}/◐${counts.partial}/■${counts.blocked}/✗${counts.failed} of ${counts.total})`,
-						terminal === "done" ? "info" : "warning",
+						terminal === "completed" ? "info" : "warning",
 					);
 					panelForceUntil = Date.now() + 120_000;
 					paint(sessionUi, { force: true });
@@ -773,18 +800,21 @@ export default function (pi: ExtensionAPI) {
 					pi.sendMessage(
 						{
 							customType: "meta-loop-result",
-							content: [
-								`[pi-meta-loop] Supervised run ${terminal} phase=${result.board.phase} (runId=${runId}).`,
-								terminal === "done"
-									? ""
-									: "This is NOT a full success — verify tickets before telling the user the goal is complete.",
-								"",
-								result.summary,
-							]
-								.filter(Boolean)
-								.join("\n"),
+							content: buildChatDigest({
+								board: result.board,
+								verdicts: result.verdicts,
+								usage: result.usage,
+								runId,
+								status: terminal,
+							}),
 							display: true,
-							details: { runId, board: result.board, verdicts: result.verdicts, status: terminal },
+							// The board is on disk and /tasks reads it from there; shipping it back
+							// through the message only doubles the context cost.
+							details: {
+								runId,
+								status: terminal,
+								verification: result.board.verification,
+							},
 						},
 						{ deliverAs: "followUp", triggerTurn: true },
 					);
@@ -853,18 +883,27 @@ export default function (pi: ExtensionAPI) {
 			if (!completed) {
 				throw new Error(`Supervised run ${runId} finished without a persisted result.`);
 			}
-			const summary = completed.summary ?? `Supervised run finished with status ${completed.status}.`;
-			if (completed.status !== "done") {
-				throw new Error(`Supervised run ${runId} ${completed.status}: ${summary}`);
+			const digest = buildChatDigest({
+				board: completed.board,
+				verdicts: completed.verdicts ?? [],
+				usage: completed.usage ?? emptyUsage(),
+				runId,
+				status: completed.status,
+			});
+			const verification = completed.board.verification;
+			// A finished-but-unchecked run is a real outcome, reported as such. Only a run
+			// that stopped, errored, or failed a gate that actually ran is an error.
+			if (completed.status === "stopped" || completed.status === "error" || verification?.status === "failed") {
+				throw new Error(`Supervised run ${runId} ${completed.status}: ${digest}`);
 			}
 			return {
-				content: [{ type: "text", text: summary }],
+				content: [{ type: "text", text: digest }],
+				usage: toPiUsage(completed.usage ?? emptyUsage()),
 				details: {
 					runId,
-					board: completed.board,
-					verdicts: completed.verdicts,
 					background: false,
 					status: completed.status,
+					verification,
 				},
 			};
 		}
@@ -973,6 +1012,12 @@ export default function (pi: ExtensionAPI) {
 				active ? `live: ${active.label}` : runMeta && "label" in runMeta ? `last: ${runMeta.label}` : "",
 				active ? `elapsed: ${formatElapsed(active.startedAt)}` : "",
 				`counts: ${countersText(c) || "—"} / ${c.total}`,
+				board.verification
+					? `verification: ${board.verification.status} — ${board.verification.detail.slice(0, 120)}`
+					: "",
+				runMeta && "usage" in runMeta && runMeta.usage
+					? `cost: $${runMeta.usage.cost.toFixed(2)} · ${runMeta.usage.turns} turns · in ${runMeta.usage.input} tok / out ${runMeta.usage.output} tok`
+					: "",
 				board.verdict ? `verdict: ${board.verdict.verdict}` : "",
 				board.planSummary ? `plan: ${board.planSummary.slice(0, 160)}` : "",
 				`goal: ${board.goal.slice(0, 120)}`,

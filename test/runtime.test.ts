@@ -191,11 +191,11 @@ describe("primary summary", () => {
 			goal: "g",
 			planSummary: "p",
 			openQuestions: [],
-			phase: "done",
+			phase: "completed",
 			reviewCount: 1,
 			tickets: [
 				baseTicket({
-					status: "done",
+					status: "completed",
 					claim: { claimedStatus: "done", changed_files: ["src/a.ts"], tests: ["ok"] },
 					evidence: { processExitCode: 0, actualChangedFiles: ["src/a.ts"], scopeViolations: [] },
 				}),
@@ -223,11 +223,11 @@ describe("terminal phase semantics", () => {
 	});
 
 	// P0 semantics change (not a weakened assertion): partial never counts as full success.
-	// Old expectation was resolveTerminalPhase(done+partial)="done"; new spec → "incomplete".
+	// Old expectation was resolveTerminalPhase(done+partial)="completed"; new spec → "incomplete".
 	it("all-done only is done; done+partial is incomplete (P0)", () => {
-		assert.equal(resolveTerminalPhase(boardOf(["done", "done"]), false), "done");
-		assert.equal(runStatusFromPhase("done", false), "done");
-		assert.equal(resolveTerminalPhase(boardOf(["done", "partial"]), false), "incomplete");
+		assert.equal(resolveTerminalPhase(boardOf(["completed", "completed"]), false), "completed");
+		assert.equal(runStatusFromPhase("completed", false), "completed");
+		assert.equal(resolveTerminalPhase(boardOf(["completed", "partial"]), false), "incomplete");
 		assert.equal(runStatusFromPhase("incomplete", false), "incomplete");
 	});
 

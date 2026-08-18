@@ -37,7 +37,7 @@ function sampleBoard(): TaskBoard {
 				allowed_scope: [],
 				forbidden: [],
 				dependencies: [],
-				status: "done",
+				status: "completed",
 			},
 			{
 				id: "t2",
@@ -813,7 +813,7 @@ describe("run retention", () => {
 			planSummary: "",
 			openQuestions: [],
 			tickets: [],
-			phase: "done",
+			phase: "completed",
 			reviewCount: 0,
 		};
 		const ids = ["run-1", "run-2", "run-3", "run-4", "run-5"];
@@ -822,7 +822,7 @@ describe("run retention", () => {
 				runId,
 				cwd,
 				goal: "g",
-				status: "done",
+				status: "completed",
 				label: "l",
 				// writeRun stamps updatedAt itself, so order comes from write order.
 				startedAt: new Date(2020, 0, i + 1).toISOString(),

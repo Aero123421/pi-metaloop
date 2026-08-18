@@ -35,8 +35,13 @@ capability boundaries.
 ## Completion
 
 `WorkerClaim` (self-report) and `ExecutionEvidence` (exit + git + filesystem + controller verify)
-are kept separate; the harness decides the final status. A native `done` requires
-`verify.status === "passed"`.
+are kept separate; the harness decides the final status.
+
+Completion is two facts, reported separately. A ticket is `completed` when the evidence says it did
+its work. A **run** is `verified` only when the controller's verify actually ran and passed
+(`board.verification`). Verify can take a ticket down only when it ran and found a regression
+belonging to that ticket; unset, aborted, or already-red-at-baseline make the run `unverified` with
+the reason, and nothing unchecked is ever reported as verified.
 
 ### Attribution
 

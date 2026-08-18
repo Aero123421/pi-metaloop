@@ -5,6 +5,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+	buildChatDigest,
+	computeRunVerification,
 	finalizeFromEvidence,
 	parseInitialPlanRun,
 	resolveTerminalPhase,
@@ -71,39 +73,39 @@ function verdict(level: Verdict["verdict"], over: Partial<Verdict> = {}): Verdic
 
 describe("resolveTerminalPhase P0 semantics", () => {
 	// P0 specification change (not a weakened test):
-	// Old harness expected done+partial → "done". Partial is no longer full success.
+	// Old harness expected done+partial → "completed". Partial is no longer full success.
 	it("done+partial → incomplete (was done under pre-P0 expectation)", () => {
-		assert.equal(resolveTerminalPhase(boardOf(["done", "partial"]), false), "incomplete");
+		assert.equal(resolveTerminalPhase(boardOf(["completed", "partial"]), false), "incomplete");
 	});
 
 	it("all done → done", () => {
-		assert.equal(resolveTerminalPhase(boardOf(["done", "done"]), false), "done");
+		assert.equal(resolveTerminalPhase(boardOf(["completed", "completed"]), false), "completed");
 	});
 
 	it("any failed/blocked/partial without full success → incomplete", () => {
-		assert.equal(resolveTerminalPhase(boardOf(["done", "failed"]), false), "incomplete");
+		assert.equal(resolveTerminalPhase(boardOf(["completed", "failed"]), false), "incomplete");
 		assert.equal(resolveTerminalPhase(boardOf(["blocked"]), false), "incomplete");
 		assert.equal(resolveTerminalPhase(boardOf(["partial", "partial"]), false), "incomplete");
-		assert.equal(resolveTerminalPhase(boardOf(["done", "cancelled"]), false), "incomplete");
+		assert.equal(resolveTerminalPhase(boardOf(["completed", "cancelled"]), false), "incomplete");
 	});
 
 	it("pending/running → incomplete (not fake done)", () => {
-		assert.equal(resolveTerminalPhase(boardOf(["done", "pending"]), false), "incomplete");
+		assert.equal(resolveTerminalPhase(boardOf(["completed", "pending"]), false), "incomplete");
 		assert.equal(resolveTerminalPhase(boardOf(["running"]), false), "incomplete");
 	});
 
 	it("empty tickets → plan_failed; abort → stopped; locked phases kept", () => {
 		assert.equal(resolveTerminalPhase(boardOf([], "planning"), false), "plan_failed");
-		assert.equal(resolveTerminalPhase(boardOf(["done"]), true), "stopped");
-		assert.equal(resolveTerminalPhase(boardOf(["done"], "degraded"), false), "degraded");
-		assert.equal(resolveTerminalPhase(boardOf(["done"], "stopped"), false), "stopped");
-		assert.equal(resolveTerminalPhase(boardOf(["done"], "plan_failed"), false), "plan_failed");
+		assert.equal(resolveTerminalPhase(boardOf(["completed"]), true), "stopped");
+		assert.equal(resolveTerminalPhase(boardOf(["completed"], "degraded"), false), "degraded");
+		assert.equal(resolveTerminalPhase(boardOf(["completed"], "stopped"), false), "stopped");
+		assert.equal(resolveTerminalPhase(boardOf(["completed"], "plan_failed"), false), "plan_failed");
 	});
 
 	it("final-review phase does not lock: evidence drives terminal incomplete/done", () => {
 		// After Supervisor final audit label, resolveTerminalPhase still applies ticket evidence.
-		assert.equal(resolveTerminalPhase(boardOf(["done", "partial"], "final-review"), false), "incomplete");
-		assert.equal(resolveTerminalPhase(boardOf(["done", "done"], "final-review"), false), "done");
+		assert.equal(resolveTerminalPhase(boardOf(["completed", "partial"], "final-review"), false), "incomplete");
+		assert.equal(resolveTerminalPhase(boardOf(["completed", "completed"], "final-review"), false), "completed");
 		assert.equal(runStatusFromPhase("incomplete", false), "incomplete");
 	});
 });
@@ -137,27 +139,28 @@ describe("finalizeFromEvidence P0 semantics", () => {
 			claim({ claimedStatus: "done" }),
 			evidence({ processExitCode: 0, verify: { status: "passed", exitCode: 0 } }),
 		);
-		assert.equal(doneT.status, "done");
+		assert.equal(doneT.status, "completed");
 
 		const partT = baseTicket({ status: "running" });
 		finalizeFromEvidence(partT, claim({ claimedStatus: "partial" }), evidence({ processExitCode: 0 }));
 		assert.equal(partT.status, "partial");
 	});
 
-	it("exit 0 + claim done without verify → partial (done forbidden)", () => {
+	it("exit 0 + claim done without verify → completed but unchecked", () => {
+		// The ticket did its work; nobody checked it. Those are different facts and the
+		// run-level verification carries the second one — calling this "partial" said
+		// "half done" about work that was not half done.
 		const unsetT = baseTicket({ status: "running" });
 		finalizeFromEvidence(
 			unsetT,
 			claim({ claimedStatus: "done" }),
 			evidence({ processExitCode: 0, verify: { status: "unset", reason: "not configured" } }),
 		);
-		assert.equal(unsetT.status, "partial");
-		assert.match(unsetT.error ?? "", /verify|not configured|forbidden/i);
+		assert.equal(unsetT.status, "completed");
 
 		const missingT = baseTicket({ status: "running" });
 		finalizeFromEvidence(missingT, claim({ claimedStatus: "done" }), evidence({ processExitCode: 0 }));
-		assert.equal(missingT.status, "partial");
-		assert.match(missingT.error ?? "", /verify|forbidden/i);
+		assert.equal(missingT.status, "completed");
 	});
 
 	it("exit 0 + claim done + verify failed/timeout → failed", () => {
@@ -279,5 +282,156 @@ describe("initial Orchestrator plan process semantics", () => {
 		const parsed = parseInitialPlanRun({ output: validPlan, exitCode: 0 }, 8);
 		assert.equal(parsed.ok, true);
 		if (parsed.ok) assert.deepEqual(parsed.tickets.map((ticket) => ticket.id), ["plan-1"]);
+	});
+});
+
+describe("did the work happen, and was it checked", () => {
+	// Two questions, two answers. Folding them into one status is what made a finished
+	// ticket with no verify configured report as "partial" — half-done about work that
+	// was not half-done — and made a default install unable to ever say it finished.
+	const boardOfTickets = (tickets: Ticket[]): TaskBoard => ({
+		goal: "g",
+		planSummary: "p",
+		openQuestions: [],
+		phase: "completed",
+		reviewCount: 0,
+		tickets,
+	});
+
+	it("no verify configured is unverified, and says how to fix it", () => {
+		const v = computeRunVerification(boardOfTickets([baseTicket({ status: "completed" })]), {
+			verifyConfigured: false,
+			verifyMode: "per-ticket",
+		});
+		assert.equal(v.status, "unverified");
+		assert.match(v.detail, /verify not configured/);
+		assert.match(v.detail, /meta-loop-setup/);
+	});
+
+	it("every completed ticket passing its gate is a verified run", () => {
+		const t = baseTicket({
+			status: "completed",
+			evidence: {
+				processExitCode: 0,
+				actualChangedFiles: [],
+				scopeViolations: [],
+				verify: { status: "passed" },
+			},
+		});
+		const v = computeRunVerification(boardOfTickets([t]), {
+			verifyConfigured: true,
+			verifyMode: "per-ticket",
+		});
+		assert.equal(v.status, "verified");
+	});
+
+	it("a gate that ran and found a regression fails the run", () => {
+		const t = baseTicket({
+			status: "failed",
+			evidence: {
+				processExitCode: 0,
+				actualChangedFiles: [],
+				scopeViolations: [],
+				verify: { status: "failed", failedCommand: ["npm", "test"] },
+			},
+		});
+		const v = computeRunVerification(boardOfTickets([t]), {
+			verifyConfigured: true,
+			verifyMode: "per-ticket",
+		});
+		assert.equal(v.status, "failed");
+		assert.match(v.detail, /npm test/);
+	});
+
+	it("a failed final gate fails the run without reassigning blame", () => {
+		const t = baseTicket({ status: "completed" });
+		const v = computeRunVerification(boardOfTickets([t]), {
+			verifyConfigured: true,
+			verifyMode: "final",
+			finalVerify: { status: "failed", failedCommand: ["npm", "run", "typecheck"] },
+		});
+		assert.equal(v.status, "failed");
+		// One gate over the whole plan cannot say which ticket broke what.
+		assert.equal(t.status, "completed");
+	});
+
+	it("an already-red baseline leaves the run unverified, never verified", () => {
+		const t = baseTicket({
+			status: "completed",
+			evidence: {
+				processExitCode: 0,
+				actualChangedFiles: [],
+				scopeViolations: [],
+				verify: { status: "failed", failedCommand: ["npm", "test"], preExisting: true },
+			},
+		});
+		const v = computeRunVerification(boardOfTickets([t]), {
+			verifyConfigured: true,
+			verifyMode: "per-ticket",
+		});
+		assert.equal(v.status, "unverified");
+		assert.match(v.detail, /baseline was already failing/);
+	});
+
+	it("nothing completed is nothing to verify", () => {
+		const v = computeRunVerification(boardOfTickets([baseTicket({ status: "blocked" })]), {
+			verifyConfigured: true,
+			verifyMode: "per-ticket",
+		});
+		assert.equal(v.status, "unverified");
+		assert.match(v.detail, /no completed tickets/);
+	});
+});
+
+describe("what goes back into the conversation", () => {
+	function bigBoard(): TaskBoard {
+		return {
+			goal: "harden everything",
+			planSummary: "x".repeat(4000),
+			openQuestions: [],
+			phase: "completed",
+			reviewCount: 2,
+			verification: { status: "unverified", detail: "verify not configured" },
+			tickets: Array.from({ length: 40 }, (_, i) =>
+				baseTicket({
+					id: `t${i}`,
+					status: "completed",
+					goal: "y".repeat(500),
+					report: "z".repeat(5000),
+					claim: { claimedStatus: "done", unresolved: ["w".repeat(400)] },
+				}),
+			),
+		};
+	}
+
+	const usage = { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 1.5, turns: 4 };
+
+	it("stays small enough to belong in a chat turn", () => {
+		// The old summary put 8-25KB into the context of every run, most of it the
+		// Worker's own prose — the one thing this harness does not take at face value.
+		const digest = buildChatDigest({ board: bigBoard(), verdicts: [], usage, runId: "r1", status: "completed" });
+		assert.ok(digest.length <= 2000, `digest was ${digest.length} chars`);
+		assert.match(digest, /full report: .*summary\.md/);
+		assert.match(digest, /usage: \$1\.50/);
+	});
+
+	it("warns unless the run both finished and was verified", () => {
+		const unverified = buildChatDigest({
+			board: { ...bigBoard(), verification: { status: "unverified", detail: "d" } },
+			verdicts: [],
+			usage,
+			runId: "r1",
+			status: "completed",
+		});
+		assert.match(unverified, /not a verified success/);
+
+		const verified = buildChatDigest({
+			board: { ...bigBoard(), verification: { status: "verified", detail: "d" } },
+			verdicts: [],
+			usage,
+			runId: "r1",
+			status: "completed",
+		});
+		assert.ok(!/not a verified success/.test(verified));
 	});
 });

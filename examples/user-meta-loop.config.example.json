@@ -15,7 +15,6 @@
 	},
 	"executor": {
 		"timeoutSec": 1800,
-		"maxParallel": 4,
 		"verifyProfiles": {
 			"node": [
 				[

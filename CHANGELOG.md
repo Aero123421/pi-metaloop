@@ -4,6 +4,57 @@
 
 ### Changed
 
+- **"Did the work happen" and "was it checked" are now two answers, not one.** A ticket is
+  `completed` when the evidence says it did its work; a run is `verified` only when the
+  controller's verify actually ran and passed (`board.verification`, one of `verified` /
+  `unverified` / `failed`, with the reason).
+
+  Verify may take a ticket down only when it ran and found a regression belonging to *that*
+  ticket. Unset, aborted, or already-failing-at-baseline no longer demote anything — they make
+  the run `unverified` and say why. The gate is not weakened: nothing unchecked is reported as
+  verified, the summary carries a do-not-report-as-complete line unless the run both finished
+  and verified, and a foreground `orchestrate` still throws on a verify that ran and failed.
+
+  What changes is the default experience. With no verify configured every native ticket used to
+  cap at `partial` and every run ended `incomplete` — a fresh install could never say it had
+  finished anything, and "partial" said *half done* about work that was not half done.
+
+- `TicketStatus.done` is `completed`, `BoardPhase.done` is `completed`, `RunStatus.done` is
+  `completed`. The Worker's own `claimedStatus` keeps `done` — that is its self-report
+  vocabulary, and the harness translating it is the point.
+
+- The shared final verify (`verifyMode: "final"`) records itself on the waiting tickets without
+  changing their status. One gate covering the whole plan cannot say which ticket broke what, so
+  marking each waiting ticket `failed` because the tree ended red attributed a single
+  unattributable fact to every one of them. The run's verification carries it instead.
+
+- The chat gets a digest, not the report. `buildChatDigest` caps at 2,000 characters — outcome,
+  counts, verification, findings, unresolved, cost, and the path to the full summary. The old
+  message injected the whole report: 8-25KB per run measured on the persisted records, most of
+  it the Worker's own prose, which is the one thing this harness explicitly does not take at
+  face value. The full report is still written to disk and reachable from `/tasks`.
+
+- Board schema is version 2. Boards written by earlier versions are migrated on read
+  (`done` → `completed`, the removed `revision` phase → `planning`); an unknown version still
+  fails closed.
+
+### Added
+
+- Run cost is visible. The footer shows `$X.XX` while a run has spend, `/tasks` reports cost,
+  turns and tokens, and a foreground `orchestrate` returns pi's `usage` field so an orchestrated
+  run lands in the session totals. It was already being aggregated and persisted, and shown to
+  nobody.
+
+- `computeRunVerification` and `RunVerification` on the board.
+
+### Removed
+
+- `executor.maxParallel`. It only ever reached sfh flows and native tickets run serially, so
+  after the sfh removal it was a setting that did nothing. Native parallelism arrives with
+  issue #4 under a name that describes it.
+
+### Changed
+
 - **A human approves the plan before anything is written.** The initial audit no longer has
   run-ending authority over work the person who asked for it has not seen. `red` still stops
   the run and never reaches the gate; `yellow` is findings, shown to the reviewer;

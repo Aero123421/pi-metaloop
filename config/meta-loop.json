@@ -23,7 +23,6 @@
 	},
 	"executor": {
 		"timeoutSec": 1800,
-		"maxParallel": 4,
 		"verifyMode": "per-ticket"
 	},
 	"approval": {

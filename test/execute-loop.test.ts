@@ -77,7 +77,7 @@ const PLAN = {
 	],
 };
 
-const WORKER_REPORT = fence({ status: "done", changed_files: [], tests: [], unresolved: [], assumptions: [] });
+const WORKER_REPORT = fence({ status: "completed", changed_files: [], tests: [], unresolved: [], assumptions: [] });
 
 function config(over: Partial<MetaLoopConfig> = {}): MetaLoopConfig {
 	return structuredClone({ ...defaultConfig, ...over }) as MetaLoopConfig;
@@ -122,7 +122,7 @@ describe("execute loop: audit outcomes", () => {
 		);
 
 		// Fail-closed: an unparseable initial audit does not start execution.
-		assert.equal(result.board.tickets.every((t) => t.status !== "done"), true);
+		assert.equal(result.board.tickets.every((t) => t.status !== "completed"), true);
 		const supervise = fs.readdirSync(artifactDir).filter((f) => f.startsWith("supervise-"));
 		assert.ok(supervise.length > 0, "an unusable audit is the run's cause of death; keep its output");
 		const body = fs.readFileSync(path.join(artifactDir, supervise[0]!), "utf-8");
@@ -150,9 +150,9 @@ describe("execute loop: audit outcomes", () => {
 		);
 
 		assert.ok(rec.roles.includes("worker"), "green must reach the worker");
-		assert.ok(["done", "incomplete"].includes(result.board.phase), `phase was ${result.board.phase}`);
+		assert.ok(["completed", "incomplete"].includes(result.board.phase), `phase was ${result.board.phase}`);
 		// Without a configured verify the ticket cannot be `done` — that gate is the point.
-		assert.ok(result.board.tickets.every((t) => t.status !== "done"));
+		assert.ok(result.board.tickets.every((t) => t.status !== "completed"));
 
 		cleanup(cwd);
 	});
@@ -250,7 +250,7 @@ describe("execute loop: roles answer through submission tools", () => {
 		const fake = submittingRunRole({
 			orchestrator: PLAN,
 			supervisor: { verdict: "green", scope: "overall", observations: [] },
-			worker: { status: "done", changed_files: [], tests: [], unresolved: [], assumptions: [] },
+			worker: { status: "completed", changed_files: [], tests: [], unresolved: [], assumptions: [] },
 		});
 
 		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
@@ -272,7 +272,7 @@ describe("execute loop: roles answer through submission tools", () => {
 		const fake = submittingRunRole({
 			orchestrator: PLAN,
 			supervisor: { verdict: "green", scope: "overall", observations: [] },
-			worker: { status: "done", changed_files: [], tests: [], unresolved: [], assumptions: [] },
+			worker: { status: "completed", changed_files: [], tests: [], unresolved: [], assumptions: [] },
 		});
 		await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
 			artifactDir,
@@ -396,7 +396,7 @@ describe("plan approval", () => {
 		assert.equal(req!.board.tickets.length, 1);
 		assert.equal(req!.verifyConfigured, false);
 		assert.ok(rec.roles.includes("worker"), "approval releases the run");
-		assert.ok(["done", "incomplete"].includes(result.board.phase));
+		assert.ok(["completed", "incomplete"].includes(result.board.phase));
 		cleanup(cwd);
 	});
 

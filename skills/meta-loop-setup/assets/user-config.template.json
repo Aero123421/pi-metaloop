@@ -13,7 +13,6 @@
 	},
 	"executor": {
 		"timeoutSec": 1800,
-		"maxParallel": 4,
 		"verifyProfiles": {
 			"node": [["npm", "test"], ["npm", "run", "typecheck"]],
 			"rust": [["cargo", "test", "--locked"], ["cargo", "clippy", "--locked", "--", "-D", "warnings"]],

@@ -110,8 +110,9 @@ pi -e /path/to/pi-meta-loop/src/index.ts
 
 ### Do this first
 
-Out of the box there is **no trusted verify configured**, and without one no ticket can reach
-`done` — every run ends `incomplete` by design. Set a verify profile before your first real run:
+Out of the box there is **no trusted verify configured**. Work still completes, but no run can be
+called `verified` — every result is reported `completed · unverified`, and the summary says so.
+Set a verify profile before your first real run:
 
 ```text
 /skill:meta-loop-setup     # interactive; writes the config for you
@@ -163,7 +164,7 @@ Empty string = inherit pi's default model. Format is the same as pi `--model`.
 
 ### Trusted verify profiles
 
-Native Worker `done` requires controller-side verify. Define approved argv in user config; project config may only select an existing profile.
+A run is only `verified` when the controller's own verify ran and passed. Define approved argv in user config; project config may only select an existing profile.
 
 ```jsonc
 // user: ~/.pi/agent/meta-loop/config.json
@@ -173,7 +174,14 @@ Native Worker `done` requires controller-side verify. Define approved argv in us
 { "executor": { "verifyProfile": "node", "verifyTimeoutSec": 600 } }
 ```
 
-Projects cannot introduce profiles or argv. Verify that is unset or aborted leaves a ticket `partial`; verify that ran and reported a regression makes it `failed`. Either way `done` is refused. `/ml-doctor` shows the effective profile, argv, timeout, and provenance.
+Projects cannot introduce profiles or argv.
+
+**Two questions, two answers.** Whether a ticket did its work and whether anyone checked it are
+different facts, and the harness reports them separately. A verify that ran and found a regression
+belonging to a ticket makes that ticket `failed`. A verify that was unset, aborted, or already
+failing before the run started does not touch the ticket — it makes the *run* `unverified`, with the
+reason. Nothing that was not checked is ever reported as verified. `/ml-doctor` shows the effective
+profile, argv, timeout, and provenance.
 
 **When verify runs.** `executor.verifyMode` is `per-ticket` by default: the full sequence runs
 after every native ticket. For a plan whose intermediate tickets cannot leave the tree green on
@@ -183,8 +191,9 @@ their own — the normal case for a decomposed change — use `final`:
 { "executor": { "verifyMode": "final" } }
 ```
 
-Tickets that claim `done` wait as `partial`, one verify runs after the execute loop, and they are
-promoted together if it passes.
+Tickets record that they are waiting on the shared gate; one verify runs after the execute loop and
+its result becomes the run's verification. It is not attributed to individual tickets — one gate over
+the whole plan cannot say which ticket broke what.
 
 **Baseline.** Verify also runs once *before* the first ticket. If a command was already failing
 then, a ticket that fails the same command is recorded `partial` with `verify.preExisting`

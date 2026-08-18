@@ -28,7 +28,13 @@ fail-closed・evidence・verify・capability 境界の側である。
 ## 完了判定
 
 WorkerClaim（自己申告）と ExecutionEvidence（exit + git + filesystem + controller verify）を分離し、
-ハーネスが最終 status を決める。native `done` は `verify.status === "passed"` 必須。
+ハーネスが最終 status を決める。
+
+完了は 2 つの事実として別々に報告される。チケットが `completed` になるのは evidence が「仕事をした」
+と言うとき。**run** が `verified` になるのは controller の verify が実際に走って通ったときだけ
+（`board.verification`）。verify がチケットを降格できるのは、走ってそのチケットに帰属する regression
+を見つけたときに限られ、未設定・中断・baseline から赤だった場合は run が `unverified` になって理由が
+残る。検査していないものが verified として報告されることはない。
 
 ### 帰責（attribution）
 
