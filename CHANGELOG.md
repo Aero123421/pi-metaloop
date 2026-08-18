@@ -4,6 +4,27 @@
 
 ### Added
 
+- Roles answer through schema-checked tools instead of a fenced JSON blob on stdout.
+  `submit_plan` / `submit_verdict` / `submit_report` are registered into each role
+  subprocess by a new `src/role-io.ts` extension, and `submit_plan` runs the harness's own
+  validators inside the child: a plan that would be blocked comes back as a tool error the
+  model can fix in the same session, up to five attempts, instead of ending the run.
+
+  Scraping stdout has one failure mode and it is fatal — the parent cannot say "that was not
+  valid, try again" to a process that has already exited. Fenced JSON remains as a fallback
+  for one release; whichever protocol answered is recorded (`source: submission |
+  fence-fallback | none`) on the plan meta artifact, the audit artifact, and `claim.source`,
+  so a silent regression to the old path is visible rather than invisible.
+
+- `src/plan-validation.ts` holds `validatePlanGraph` / `validateTicket` / `toTicket` and the
+  new `validateSubmittedPlan`, which reports *every* violation at once. One round-trip per
+  violation would spend the whole submission budget on a plan with two problems. The harness
+  re-runs the same validators on whatever arrives: the child is a convenience, never the
+  authority.
+
+- `installScopeGuard` is split out of the scope-guard extension so the Worker, which loads
+  exactly one `-e` extension, gets both the guard and its submission tool from `role-io`.
+
 - A rejected revision now says why. `mergeRevisedTicketsDetailed` names the cause
   (`unchanged-echo`, `exceeds-cap`, `invalid-graph`, `no-pending-remediation`,
   `frozen-exceeds-cap`, `empty-task-list`) and the cause reaches both the blocked ticket's

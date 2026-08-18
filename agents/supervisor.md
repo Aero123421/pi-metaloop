@@ -92,16 +92,8 @@ reported as progress at all.
 
 ## Output format (strict)
 
-```json
-{
-  "verdict": "green",
-  "scope": "overall",
-  "observations": ["fact-based observations"],
-  "risk": ["risks"],
-  "required_actions": ["required corrections (yellow/red only)"],
-  "optional_advice": ["optional advice"],
-  "affected_tasks": ["ticket ids"],
-  "orchestrator_guidance": ["behavioral corrections to inject into the Orchestrator"],
-  "harness_suggestions": ["environment-side improvements, for repeated failures only"]
-}
-```
+Call the `submit_verdict` tool exactly once. Do not print the verdict as text.
+
+- `verdict`: `green` | `yellow` | `red`
+- `observations[]`, `risk[]`, `required_actions[]`, `optional_advice[]`, `affected_tasks[]`,
+  `orchestrator_guidance[]`, `harness_suggestions[]`

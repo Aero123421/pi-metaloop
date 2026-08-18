@@ -294,3 +294,110 @@ describe("execute loop: a plan the harness would block never reaches the Supervi
 		cleanup(cwd);
 	});
 });
+
+describe("execute loop: roles answer through submission tools", () => {
+	/** A fake role that writes its answer where the harness told it to, and prints nothing. */
+	function submittingRunRole(payloads: Record<string, unknown>) {
+		const seen: { role: string; args: string[]; env: Record<string, string> }[] = [];
+		const run = async (role: { name: string }, _task: string, opts: any) => {
+			const env = (opts.extraEnv ?? {}) as Record<string, string>;
+			seen.push({ role: role.name, args: opts.extraArgs ?? [], env });
+			const target = env.PI_META_LOOP_SUBMIT_PATH;
+			const tool =
+				role.name === "orchestrator" ? "submit_plan" : role.name === "supervisor" ? "submit_verdict" : "submit_report";
+			if (target) {
+				fs.mkdirSync(path.dirname(target), { recursive: true });
+				fs.writeFileSync(
+					target,
+					JSON.stringify({ tool, payload: payloads[role.name], attempt: 1, at: "2026-01-01T00:00:00.000Z" }),
+					"utf-8",
+				);
+			}
+			// Deliberately no fenced JSON: the submission must be the only channel.
+			return ok("done, submitted via tool.");
+		};
+		return { seen, run };
+	}
+
+	it("runs end to end with no fenced JSON anywhere in role output", async () => {
+		const cwd = tmpCwd();
+		const artifactDir = path.join(cwd, "artifacts");
+		fs.mkdirSync(artifactDir, { recursive: true });
+
+		const fake = submittingRunRole({
+			orchestrator: PLAN,
+			supervisor: { verdict: "green", scope: "overall", observations: [] },
+			worker: { status: "done", changed_files: [], tests: [], unresolved: [], assumptions: [] },
+		});
+
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			artifactDir,
+			runRole: fake.run as never,
+		});
+
+		assert.ok(fake.seen.some((s) => s.role === "worker"), "the plan must reach a worker");
+		assert.equal(result.board.tickets.length, 1);
+		assert.equal(result.board.tickets[0]!.claim?.source, "submission");
+		cleanup(cwd);
+	});
+
+	it("passes each role its own identity, submission path and launch flags", async () => {
+		const cwd = tmpCwd();
+		const artifactDir = path.join(cwd, "artifacts");
+		fs.mkdirSync(artifactDir, { recursive: true });
+
+		const fake = submittingRunRole({
+			orchestrator: PLAN,
+			supervisor: { verdict: "green", scope: "overall", observations: [] },
+			worker: { status: "done", changed_files: [], tests: [], unresolved: [], assumptions: [] },
+		});
+		await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			artifactDir,
+			runRole: fake.run as never,
+		});
+
+		const orch = fake.seen.find((s) => s.role === "orchestrator")!;
+		const sup = fake.seen.find((s) => s.role === "supervisor")!;
+		const wrk = fake.seen.find((s) => s.role === "worker")!;
+
+		assert.equal(orch.env.PI_META_LOOP_ROLE, "orchestrator");
+		assert.equal(orch.env.PI_META_LOOP_MAX_TASKS, String(config().limits.maxTasks));
+		assert.ok(orch.args.includes("-e"));
+		assert.ok(orch.args.some((a) => a.endsWith("role-io.ts")));
+		// Read-only roles keep the user's provider extensions; only the writer is sealed.
+		assert.ok(!orch.args.includes("--no-extensions"));
+		assert.ok(!sup.args.includes("--no-extensions"));
+		assert.equal(sup.env.PI_META_LOOP_ROLE, "supervisor");
+		assert.equal(wrk.env.PI_META_LOOP_ROLE, "worker");
+		assert.ok(wrk.args.includes("--no-extensions"), "the writing role stays sealed");
+		assert.ok(wrk.args.some((a) => a.endsWith("role-io.ts")));
+		assert.ok(wrk.env.PI_META_LOOP_ALLOWED_SCOPE.includes("src/**"));
+		cleanup(cwd);
+	});
+
+	it("falls back to fenced JSON and records that it did", async () => {
+		const cwd = tmpCwd();
+		const artifactDir = path.join(cwd, "artifacts");
+		fs.mkdirSync(artifactDir, { recursive: true });
+
+		// Nothing is written to the submission path — the old protocol only.
+		const rec = recorder((role) => {
+			if (role === "orchestrator") return fence(PLAN);
+			if (role === "supervisor") return fence({ verdict: "green", scope: "overall", observations: [] });
+			return WORKER_REPORT;
+		});
+
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			artifactDir,
+			runRole: rec.runRole as never,
+		});
+
+		assert.ok(rec.roles.includes("worker"));
+		assert.equal(result.board.tickets[0]!.claim?.source, "fence-fallback");
+		const meta = JSON.parse(fs.readFileSync(path.join(artifactDir, "plan-attempt-1.meta.json"), "utf-8"));
+		assert.equal(meta.source, "fence-fallback");
+		const audit = fs.readFileSync(path.join(artifactDir, "supervise-initial-1.txt"), "utf-8");
+		assert.match(audit, /source: fence-fallback/);
+		cleanup(cwd);
+	});
+});

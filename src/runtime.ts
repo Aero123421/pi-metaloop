@@ -19,6 +19,13 @@ import {
 	filesystemEvidencePath,
 	type FilesystemSnapshot,
 } from "./fs-snapshot.ts";
+import {
+	toTicket,
+	validatePlanGraph,
+	validateSubmittedPlan,
+	validateTicket,
+	type PlanPayload,
+} from "./plan-validation.ts";
 import { extractJson, loadRole, runRole } from "./spawn.ts";
 import { checkAutoTriggers, evaluateTriggers, type RuntimeEvent, type SupervisorStats } from "./triggers.ts";
 import {
@@ -161,24 +168,8 @@ function userRequest(input: OrchestrateInput): string {
 	return parts.join("\n\n");
 }
 
-function toTicket(t: any, i: number, previous?: Ticket): Ticket {
-	return {
-		id: String(t.id ?? previous?.id ?? `task-${i + 1}`),
-		goal: String(t.goal ?? previous?.goal ?? ""),
-		deliverables: Array.isArray(t.deliverables) ? t.deliverables.map(String) : previous?.deliverables ?? [],
-		acceptance: Array.isArray(t.acceptance) ? t.acceptance.map(String) : previous?.acceptance ?? [],
-		allowed_scope: Array.isArray(t.allowed_scope) ? t.allowed_scope.map(String) : previous?.allowed_scope ?? [],
-		forbidden: Array.isArray(t.forbidden) ? t.forbidden.map(String) : previous?.forbidden ?? [],
-		dependencies: Array.isArray(t.dependencies) ? t.dependencies.map(String) : previous?.dependencies ?? [],
-		context: t.context != null ? String(t.context) : previous?.context,
-		execution: "native",
-		status: previous?.status ?? "pending",
-		report: previous?.report,
-		error: previous?.error,
-		claim: previous?.claim,
-		evidence: previous?.evidence,
-	};
-}
+export { toTicket, validatePlanGraph, validateSubmittedPlan, validateTicket };
+export type { PlanPayload, TicketDraft } from "./plan-validation.ts";
 
 export type InitialPlanParseResult =
 	| { ok: true; planSummary: string; openQuestions: string[]; tickets: Ticket[] }
@@ -188,11 +179,14 @@ export type InitialPlanParseResult =
 export function parseInitialPlanRun(
 	run: Pick<RoleRunResult, "output" | "exitCode">,
 	maxTasks: number,
+	/** Preferred over stdout when the Orchestrator answered through `submit_plan`. */
+	submitted?: PlanPayload | null,
 ): InitialPlanParseResult {
 	if (run.exitCode !== 0) {
 		return { ok: false, error: `orchestrator exit ${run.exitCode}` };
 	}
-	const plan = extractJson<{ summary?: string; open_questions?: string[]; tasks?: any[] }>(run.output);
+	const plan =
+		submitted ?? extractJson<{ summary?: string; open_questions?: string[]; tasks?: any[] }>(run.output);
 	if (!plan || !Array.isArray(plan.tasks) || plan.tasks.length === 0) {
 		return {
 			ok: false,
@@ -354,62 +348,6 @@ export function formatBoardForSupervisor(board: TaskBoard, opts?: { compact?: bo
 	);
 }
 
-export function validatePlanGraph(tickets: Ticket[]): string | null {
-	const ids = new Set<string>();
-	for (const t of tickets) {
-		if (!t.id.trim()) return "empty ticket id";
-		if (ids.has(t.id)) return `duplicate ticket id: ${t.id}`;
-		ids.add(t.id);
-	}
-	for (const t of tickets) {
-		for (const d of t.dependencies) {
-			if (d === t.id) return `self-dependency: ${t.id}`;
-			if (!ids.has(d)) return `missing dependency ${d} referenced by ${t.id}`;
-		}
-		if (t.acceptance.length === 0) {
-			return `native ticket ${t.id} has empty acceptance`;
-		}
-	}
-	// cycle detect
-	const visiting = new Set<string>();
-	const done = new Set<string>();
-	const map = new Map(tickets.map((t) => [t.id, t]));
-	const visit = (id: string): boolean => {
-		if (done.has(id)) return false;
-		if (visiting.has(id)) return true;
-		visiting.add(id);
-		for (const d of map.get(id)?.dependencies ?? []) {
-			if (visit(d)) return true;
-		}
-		visiting.delete(id);
-		done.add(id);
-		return false;
-	};
-	for (const id of ids) {
-		if (visit(id)) return "dependency cycle detected";
-	}
-	return null;
-}
-
-export function validateTicket(ticket: Ticket, scopeCeiling?: string[]): string | null {
-	// Only the native pi worker exists. An unknown executor is a plan the harness cannot
-	// enforce scope for, so it is refused rather than silently run as native (issue #4).
-	if (ticket.execution !== undefined && ticket.execution !== "native") {
-		return `unknown execution "${String(ticket.execution)}" — only "native" is supported`;
-	}
-	// native implementation tickets must declare a non-empty write scope (fail closed)
-	if (!ticket.allowed_scope?.length) {
-		return 'native implementation ticket requires non-empty allowed_scope';
-	}
-	// A plan is model output; without a ceiling the write surface is chosen entirely
-	// by the Orchestrator. When the user set one, the plan must stay inside it.
-	const outside = scopeRulesOutsideCeiling(ticket.allowed_scope ?? [], scopeCeiling);
-	if (outside.length > 0) {
-		return `allowed_scope entries outside limits.scopeCeiling: ${outside.join(", ")} (ceiling: ${(scopeCeiling ?? []).join(", ")})`;
-	}
-	return null;
-}
-
 function pickNext(board: TaskBoard, newlyBlocked?: Ticket[]): Ticket | null {
 	for (const t of board.tickets) {
 		if (t.status !== "pending") continue;
@@ -440,6 +378,72 @@ function pickNext(board: TaskBoard, newlyBlocked?: Ticket[]): Ticket | null {
 
 function scopeGuardPath(): string {
 	return path.join(path.dirname(fileURLToPath(import.meta.url)), "scope-guard.ts");
+}
+
+function roleIoPath(): string {
+	return path.join(path.dirname(fileURLToPath(import.meta.url)), "role-io.ts");
+}
+
+export interface RoleSubmission<T> {
+	tool: string;
+	payload: T;
+	attempt: number;
+	at: string;
+}
+
+/**
+ * Read what a role submitted through its tool.
+ *
+ * Anything unreadable, misshapen or from the wrong tool returns null so the caller
+ * falls back to scraping stdout — the submission path is the primary protocol, not
+ * a hard requirement.
+ */
+export function readSubmission<T>(
+	artifactDir: string | undefined,
+	name: string,
+	tool: string,
+): RoleSubmission<T> | null {
+	if (!artifactDir) return null;
+	try {
+		const raw = fs.readFileSync(path.join(artifactDir, "submissions", name), "utf-8");
+		const parsed = JSON.parse(raw);
+		if (!parsed || parsed.tool !== tool || typeof parsed.payload !== "object" || parsed.payload === null) {
+			return null;
+		}
+		return parsed as RoleSubmission<T>;
+	} catch {
+		return null;
+	}
+}
+
+/** Where a role should write its submission for this call. */
+function submissionPath(artifactDir: string | undefined, name: string): string | undefined {
+	return artifactDir ? path.join(artifactDir, "submissions", name) : undefined;
+}
+
+/** Which protocol actually produced the answer — recorded so a silent fallback is visible. */
+function submissionSource(
+	artifactDir: string | undefined,
+	name: string,
+	tool: string,
+	output: string,
+): "submission" | "fence-fallback" | "none" {
+	if (readSubmission(artifactDir, name, tool)) return "submission";
+	return extractJson(output) ? "fence-fallback" : "none";
+}
+
+/** Shape a report payload (submitted or scraped) into a claim. */
+export function normalizeClaim(j: any): WorkerClaim {
+	const arr = (v: unknown): string[] | undefined => (Array.isArray(v) ? v.map(String) : undefined);
+	const status = j?.status;
+	return {
+		claimedStatus: status === "done" || status === "partial" || status === "blocked" ? status : undefined,
+		changed_files: arr(j?.changed_files),
+		tests: arr(j?.tests),
+		unresolved: arr(j?.unresolved),
+		assumptions: arr(j?.assumptions),
+		notes: typeof j?.notes === "string" ? j.notes : undefined,
+	};
 }
 
 function parseWorkerClaim(output: string): WorkerClaim {
@@ -833,6 +837,13 @@ export async function runSupervisedTask(
 		: "";
 	const supervisorStandards = trustNote;
 
+	const orchestratorEnv = (submitPath: string | undefined): Record<string, string> => ({
+		PI_META_LOOP_ROLE: "orchestrator",
+		PI_META_LOOP_MAX_TASKS: String(config.limits.maxTasks),
+		...(scopeCeiling?.length ? { PI_META_LOOP_SCOPE_CEILING: JSON.stringify(scopeCeiling) } : {}),
+		...(submitPath ? { PI_META_LOOP_SUBMIT_PATH: submitPath } : {}),
+	});
+
 	async function orchestratorPlan(): Promise<boolean> {
 		// Plans with many tickets need more headroom than worker reports.
 		const planCap = Math.max(cap, 200_000);
@@ -858,12 +869,15 @@ export async function runSupervisedTask(
 				orchestratorStandards,
 			].join("\n");
 			notify(hooks, board, `planning: Orchestrator attempt ${attempt}/2`);
+			const submitName = `plan-attempt-${attempt}.json`;
 			const run = await callRole(orchestrator, prompt, {
 				cwd,
 				signal: hooks.signal,
 				timeoutSec: heavyTimeoutSec,
 				outputCap: planCap,
 				onProgress: hooks.onActivity,
+				extraArgs: ["-e", roleIoPath()],
+				extraEnv: orchestratorEnv(submissionPath(hooks.artifactDir, submitName)),
 			});
 			addUsage(usage, run.usage);
 			writeHookArtifact(hooks.artifactDir, `plan-attempt-${attempt}.txt`, run.output || "");
@@ -876,13 +890,15 @@ export async function runSupervisedTask(
 						exitCode: run.exitCode,
 						outputChars: (run.output || "").length,
 						truncated: (run.output || "").includes("...[truncated]"),
+						source: submissionSource(hooks.artifactDir, `plan-attempt-${attempt}.json`, "submit_plan", run.output),
 					},
 					null,
 					2,
 				),
 			);
 
-			const parsed = parseInitialPlanRun(run, config.limits.maxTasks);
+			const submitted = readSubmission<PlanPayload>(hooks.artifactDir, `plan-attempt-${attempt}.json`, "submit_plan");
+			const parsed = parseInitialPlanRun(run, config.limits.maxTasks, submitted?.payload);
 			if (!parsed.ok) {
 				lastErr = parsed.error;
 				continue;
@@ -1045,12 +1061,20 @@ export async function runSupervisedTask(
 			"",
 			"Respond with the verdict JSON only.",
 		].join("\n");
+		const verdictName = `supervise-${stage}-${superviseCalls + 1}.json`;
 		const run = await callRole(supervisor, task, {
 			cwd,
 			signal: hooks.signal,
 			timeoutSec: heavyTimeoutSec,
 			outputCap: cap,
 			onProgress: hooks.onActivity,
+			extraArgs: ["-e", roleIoPath()],
+			extraEnv: {
+				PI_META_LOOP_ROLE: "supervisor",
+				...(submissionPath(hooks.artifactDir, verdictName)
+					? { PI_META_LOOP_SUBMIT_PATH: submissionPath(hooks.artifactDir, verdictName)! }
+					: {}),
+			},
 		});
 		addUsage(usage, run.usage);
 		// Budget counts real Supervisor calls. Counting triggers instead would let one
@@ -1059,7 +1083,9 @@ export async function runSupervisedTask(
 		stats.lastReviewAt = Date.now();
 		stats.startsSinceReview = 0;
 		superviseCalls++;
-		const v = run.exitCode === 0 ? extractJson<Verdict>(run.output) : undefined;
+		const submittedVerdict = readSubmission<Verdict>(hooks.artifactDir, verdictName, "submit_verdict");
+		const v =
+			submittedVerdict?.payload ?? (run.exitCode === 0 ? extractJson<Verdict>(run.output) : undefined);
 		const usable = Boolean(v && (v.verdict === "green" || v.verdict === "yellow" || v.verdict === "red"));
 		// An initial audit that cannot be parsed stops the run before any ticket executes.
 		// Keep the raw output so that outcome can be explained afterwards.
@@ -1070,6 +1096,7 @@ export async function runSupervisedTask(
 				`stage: ${stage}`,
 				`reason: ${reason}`,
 				`exitCode: ${run.exitCode}`,
+				`source: ${submittedVerdict ? "submission" : v ? "fence-fallback" : "none"}`,
 				`verdict: ${usable ? v?.verdict : "(unusable)"}`,
 				"",
 				"## raw output",
@@ -1376,6 +1403,7 @@ export async function runSupervisedTask(
 		}
 
 		notify(hooks, board, `executing: ${ticket.id}`);
+		const reportName = `ticket-${sanitizeId(ticket.id)}-report.json`;
 		const workerTask = [
 			"Execute this ticket only. Stay inside allowed_scope. End with the required JSON report.",
 			"",
@@ -1423,11 +1451,15 @@ export async function runSupervisedTask(
 				outputCap: cap,
 				onProgress: hooks.onActivity,
 				// Discovery off; only the harness scope-guard extension is loaded.
-				extraArgs: ["--no-extensions", "-e", scopeGuardPath()],
+				extraArgs: ["--no-extensions", "-e", roleIoPath()],
 				extraEnv: {
+					PI_META_LOOP_ROLE: "worker",
 					PI_META_LOOP_ALLOWED_SCOPE: JSON.stringify(ticket.allowed_scope ?? []),
 					PI_META_LOOP_FORBIDDEN: JSON.stringify(ticket.forbidden ?? []),
 					PI_META_LOOP_CWD: cwd,
+					...(submissionPath(hooks.artifactDir, reportName)
+						? { PI_META_LOOP_SUBMIT_PATH: submissionPath(hooks.artifactDir, reportName)! }
+						: {}),
 				},
 			});
 			addUsage(usage, run.usage);
@@ -1437,7 +1469,14 @@ export async function runSupervisedTask(
 			// Scoped native workers have no shell, so git state changes here came
 			// from some other process in this worktree.
 			const gitEv = evaluateGitEvidence(cwd, ticket, beforeGit, afterGit, { gitCapableWorker: false });
-			const claim = parseWorkerClaim(run.output);
+			const submittedReport = readSubmission<Record<string, unknown>>(
+				hooks.artifactDir,
+				reportName,
+				"submit_report",
+			);
+			const claim: WorkerClaim = submittedReport
+				? { ...normalizeClaim(submittedReport.payload), raw: run.output.slice(0, 8000), source: "submission" }
+				: { ...parseWorkerClaim(run.output), source: "fence-fallback" };
 			const evidence: ExecutionEvidence = {
 				processExitCode: run.exitCode,
 				actualChangedFiles: [...new Set([...gitEv.actualChangedFiles, ...fsEv.actualChangedFiles])],
