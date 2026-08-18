@@ -109,6 +109,23 @@ export interface Ticket {
 	error?: string;
 	claim?: WorkerClaim;
 	evidence?: ExecutionEvidence;
+	/**
+	 * Previous runs of this ticket, oldest first.
+	 *
+	 * A long task fails partway by definition, and without a record of what was already
+	 * tried a retry is indistinguishable from a first attempt — to the harness and to the
+	 * Worker, which would repeat the approach that just failed.
+	 */
+	attempts?: TicketAttempt[];
+}
+
+export interface TicketAttempt {
+	startedAt: string;
+	finishedAt: string;
+	status: TicketStatus;
+	error?: string;
+	/** The run that made this attempt; the raw output lives in its artifact directory. */
+	runId?: string;
 }
 
 export type VerdictLevel = "green" | "yellow" | "red";

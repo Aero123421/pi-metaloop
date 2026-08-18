@@ -48,6 +48,7 @@ import type {
 	VerifyMode,
 	WorkerClaim,
 	RoleRunResult,
+	TicketStatus,
 	RunVerification,
 } from "./types.ts";
 
@@ -87,6 +88,12 @@ export interface RuntimeHooks {
 	 * interactive approver, which is a refusal rather than an implicit yes.
 	 */
 	requestApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
+	/**
+	 * Continue a board that already exists. Planning and the initial gate are skipped:
+	 * the plan was approved once and re-approving identical work only costs the user a
+	 * second decision.
+	 */
+	resumeBoard?: TaskBoard;
 }
 
 export interface RuntimeResult {
@@ -615,6 +622,73 @@ export function computeRunVerification(
 	return { status: "unverified", detail: "verify did not run" };
 }
 
+/** Ticket states a resume re-runs. Completed and partial work is left alone. */
+const RETRYABLE: TicketStatus[] = ["failed", "blocked", "cancelled", "running", "pending"];
+
+export interface ResumePreparation {
+	board: TaskBoard;
+	/** Ticket ids that will run again. */
+	retrying: string[];
+	/** Why there is nothing to do, when there is nothing to do. */
+	reason?: string;
+}
+
+/**
+ * Turn a finished board back into a runnable one.
+ *
+ * Everything already completed stays completed — a resume is not a rerun, and redoing
+ * work that succeeded is how a "retry" quietly undoes it. Each ticket being retried
+ * keeps a record of what it did last time, so the Worker is told what has already been
+ * tried instead of repeating it.
+ */
+export function prepareResume(board: TaskBoard, opts: { runId?: string } = {}): ResumePreparation {
+	const at = new Date().toISOString();
+	const retrying: string[] = [];
+	const tickets = board.tickets.map((t) => {
+		if (!RETRYABLE.includes(t.status)) return t;
+		if (t.status === "pending" && !t.error) return t;
+		retrying.push(t.id);
+		const attempts = [...(t.attempts ?? [])];
+		if (t.status !== "pending") {
+			attempts.push({
+				startedAt: at,
+				finishedAt: at,
+				status: t.status,
+				error: t.error,
+				runId: opts.runId,
+			});
+		}
+		return {
+			...t,
+			status: "pending" as const,
+			error: undefined,
+			attempts: attempts.length > 0 ? attempts : undefined,
+		};
+	});
+	const runnable = tickets.some((t) => t.status === "pending");
+	return {
+		board: { ...board, tickets, phase: "executing", verification: undefined },
+		retrying,
+		reason: runnable ? undefined : "every ticket already completed; nothing to resume",
+	};
+}
+
+/** What a retried Worker is told about its own history. */
+export function priorAttemptsNote(ticket: Ticket): string {
+	const attempts = ticket.attempts ?? [];
+	if (attempts.length === 0) return "";
+	const lines = attempts
+		.slice(-3)
+		.map((a, i) => `- attempt ${attempts.length - Math.min(attempts.length, 3) + i + 1}: ${a.status}${a.error ? ` — ${a.error.slice(0, 300)}` : ""}`);
+	return [
+		"",
+		"## Previous attempts on this ticket",
+		"This ticket has run before and did not finish. Do not repeat the approach that failed;",
+		"read the current state of the files before assuming anything.",
+		...lines,
+	].join("\n");
+}
+
 export function canRunSupervisorAudit(stage: "initial" | "mid" | "final", used: number, maximum: number): boolean {
 	return stage !== "mid" || used < maximum;
 }
@@ -966,6 +1040,16 @@ export async function runSupervisedTask(
 	const orchestrator = loadRole("orchestrator", config.roles.orchestrator);
 	const supervisor = loadRole("supervisor", config.roles.supervisor);
 	const worker = loadRole("worker", config.roles.worker);
+
+	if (hooks.resumeBoard) {
+		board.goal = hooks.resumeBoard.goal;
+		board.planSummary = hooks.resumeBoard.planSummary;
+		board.openQuestions = hooks.resumeBoard.openQuestions;
+		board.tickets = hooks.resumeBoard.tickets;
+		board.verdictHistory = hooks.resumeBoard.verdictHistory;
+		board.reviewCount = hooks.resumeBoard.reviewCount;
+		verdicts.push(...(hooks.resumeBoard.verdictHistory ?? []));
+	}
 
 	const stats: SupervisorStats = {
 		workerStarts: 0,
@@ -1354,6 +1438,10 @@ export async function runSupervisedTask(
 		return "continue";
 	}
 
+	// A resumed run re-enters at execution. The plan was written and approved once;
+	// planning again would produce different tickets and redo work that succeeded, and
+	// asking for approval again would charge the user a second decision for the same plan.
+	if (!hooks.resumeBoard) {
 	// ---------- 1. Plan ----------
 	notify(hooks, board, "planning: Orchestrator decomposing");
 	if (!(await orchestratorPlan())) {
@@ -1496,6 +1584,8 @@ export async function runSupervisedTask(
 		// A new plan is never trusted without another audit.
 	}
 
+	}
+
 	// ---------- 3. Execute ----------
 	board.phase = "executing";
 	let stopped = false;
@@ -1602,8 +1692,9 @@ export async function runSupervisedTask(
 			"",
 			"## Ticket",
 			"```json",
-			JSON.stringify(ticket, null, 2),
+			JSON.stringify({ ...ticket, attempts: undefined }, null, 2),
 			"```",
+			priorAttemptsNote(ticket),
 			"",
 			`## User request\n${input.goal}`,
 		].join("\n");

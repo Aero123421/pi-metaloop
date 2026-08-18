@@ -187,6 +187,7 @@ Projectから新しいprofileやargvは追加できない。未設定・abort �
 - `/ml-stop` — 実行中の supervised run を中断
 - `/ml-runs` — ディスク上の run 履歴（`.pi/meta-loop/runs/`）
 - `/ml-approve` — 承認待ちの計画をレビュー（承認 / 再計画 / 却下）
+- `/ml-resume [runId]` — 前回の run の失敗・未完了チケットだけを再実行（完了済みには触らない）
 - `/ml-doctor` — native done 条件と、実効的な能力境界
 - supervised 中は **フラットな色付きパネル**とフッターで進捗表示
 - `/ml-ui` — 詳細度 `compact|normal|full`（`show`/`hide` 可）。ショートカット `ctrl+shift+m`

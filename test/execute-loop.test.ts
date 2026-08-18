@@ -17,7 +17,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { defaultConfig } from "../src/config.ts";
-import { approvalPathFor, assessVerdict, runSupervisedTask, strongerApprovalPolicy } from "../src/runtime.ts";
+import {
+	approvalPathFor,
+	assessVerdict,
+	prepareResume,
+	runSupervisedTask,
+	strongerApprovalPolicy,
+} from "../src/runtime.ts";
 import type { ApprovalDecision, ApprovalRequest } from "../src/runtime.ts";
 import type { MetaLoopConfig } from "../src/config.ts";
 import type { RoleRunResult } from "../src/types.ts";
@@ -77,7 +83,7 @@ const PLAN = {
 	],
 };
 
-const WORKER_REPORT = fence({ status: "completed", changed_files: [], tests: [], unresolved: [], assumptions: [] });
+const WORKER_REPORT = fence({ status: "done", changed_files: [], tests: [], unresolved: [], assumptions: [] });
 
 function config(over: Partial<MetaLoopConfig> = {}): MetaLoopConfig {
 	return structuredClone({ ...defaultConfig, ...over }) as MetaLoopConfig;
@@ -150,9 +156,11 @@ describe("execute loop: audit outcomes", () => {
 		);
 
 		assert.ok(rec.roles.includes("worker"), "green must reach the worker");
-		assert.ok(["completed", "incomplete"].includes(result.board.phase), `phase was ${result.board.phase}`);
-		// Without a configured verify the ticket cannot be `done` — that gate is the point.
-		assert.ok(result.board.tickets.every((t) => t.status !== "completed"));
+		assert.equal(result.board.phase, "completed");
+		// The work happened. Nobody checked it, and the run says exactly that rather than
+		// pretending in either direction.
+		assert.ok(result.board.tickets.every((t) => t.status === "completed"));
+		assert.equal(result.board.verification?.status, "unverified");
 
 		cleanup(cwd);
 	});
@@ -250,7 +258,7 @@ describe("execute loop: roles answer through submission tools", () => {
 		const fake = submittingRunRole({
 			orchestrator: PLAN,
 			supervisor: { verdict: "green", scope: "overall", observations: [] },
-			worker: { status: "completed", changed_files: [], tests: [], unresolved: [], assumptions: [] },
+			worker: { status: "done", changed_files: [], tests: [], unresolved: [], assumptions: [] },
 		});
 
 		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
@@ -272,7 +280,7 @@ describe("execute loop: roles answer through submission tools", () => {
 		const fake = submittingRunRole({
 			orchestrator: PLAN,
 			supervisor: { verdict: "green", scope: "overall", observations: [] },
-			worker: { status: "completed", changed_files: [], tests: [], unresolved: [], assumptions: [] },
+			worker: { status: "done", changed_files: [], tests: [], unresolved: [], assumptions: [] },
 		});
 		await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
 			artifactDir,
@@ -506,6 +514,109 @@ describe("plan approval", () => {
 		});
 		assert.ok(rec.roles.includes("worker"));
 		assert.notEqual(result.board.phase, "stopped");
+		cleanup(cwd);
+	});
+});
+
+describe("resuming an existing board", () => {
+	const TWO_TICKETS = {
+		summary: "two slices",
+		open_questions: [],
+		tasks: [
+			{ ...PLAN.tasks[0], id: "t1" },
+			{ ...PLAN.tasks[0], id: "t2", goal: "the second thing" },
+		],
+	};
+
+	it("re-runs only the unfinished ticket, and never plans or asks again", async () => {
+		const cwd = tmpCwd();
+
+		// First run: t1 completes, t2 fails.
+		const first = recorder((role, task) => {
+			if (role === "orchestrator") return fence(TWO_TICKETS);
+			if (role === "supervisor") return fence({ verdict: "green", scope: "overall", observations: [] });
+			return /"id": "t2"/.test(task)
+				? fence({ status: "blocked", unresolved: ["needs t1's export"] })
+				: WORKER_REPORT;
+		});
+		const run1 = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: first.runRole as never,
+		});
+		const before = new Map(run1.board.tickets.map((t) => [t.id, t.status]));
+		assert.equal(before.get("t1"), "completed");
+		assert.equal(before.get("t2"), "blocked");
+
+		// Resume: only t2 should run, and no planner or approver is involved.
+		const prepared = prepareResume(run1.board, { runId: "run-1" });
+		assert.deepEqual(prepared.retrying, ["t2"]);
+
+		const workerTasks: string[] = [];
+		const second = recorder((role, task) => {
+			if (role === "worker") workerTasks.push(task);
+			if (role === "orchestrator") throw new Error("a resume must not re-plan");
+			if (role === "supervisor") return fence({ verdict: "green", scope: "overall", observations: [] });
+			return WORKER_REPORT;
+		});
+		let asked = 0;
+		const run2 = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: second.runRole as never,
+			resumeBoard: prepared.board,
+			requestApproval: async () => {
+				asked++;
+				return { action: "approve" };
+			},
+		});
+
+		assert.equal(asked, 0, "the plan was approved once already");
+		assert.ok(!second.roles.includes("orchestrator"));
+		assert.equal(second.roles.filter((r) => r === "worker").length, 1, "only the unfinished ticket runs");
+		assert.match(workerTasks[0]!, /"id": "t2"/);
+		// The retried worker is told what its previous attempt did.
+		assert.match(workerTasks[0]!, /Previous attempts/);
+		assert.match(workerTasks[0]!, /needs t1's export|blocked/);
+
+		const after = new Map(run2.board.tickets.map((t) => [t.id, t.status]));
+		assert.equal(after.get("t1"), "completed", "finished work is not redone");
+		assert.equal(after.get("t2"), "completed");
+		cleanup(cwd);
+	});
+
+	it("still runs the final audit on a resumed run", async () => {
+		const cwd = tmpCwd();
+		const rec = recorder((role) => {
+			if (role === "orchestrator") throw new Error("no planning on resume");
+			if (role === "supervisor") return fence({ verdict: "green", scope: "overall", observations: [] });
+			return WORKER_REPORT;
+		});
+		const prepared = prepareResume(
+			{
+				goal: "ship it",
+				planSummary: "p",
+				openQuestions: [],
+				phase: "incomplete",
+				reviewCount: 1,
+				tickets: [
+					{
+						id: "t1",
+						goal: "g",
+						deliverables: [],
+						acceptance: ["a"],
+						allowed_scope: ["src/**"],
+						forbidden: [],
+						dependencies: [],
+						status: "failed",
+						error: "boom",
+					},
+				],
+			},
+			{ runId: "old" },
+		);
+		await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: rec.runRole as never,
+			resumeBoard: prepared.board,
+		});
+		// The gate at the end is not optional just because the start was skipped.
+		assert.ok(rec.roles.includes("supervisor"));
 		cleanup(cwd);
 	});
 });

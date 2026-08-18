@@ -254,6 +254,7 @@ Other knobs:
 - `/ml-stop` — abort the active supervised run
 - `/ml-runs` — list on-disk runs under `.pi/meta-loop/runs/`
 - `/ml-approve` — review the plan awaiting approval (approve / replan / reject)
+- `/ml-resume [runId]` — re-run the failed and unfinished tickets of a previous run; completed work is left alone
 - `/ml-doctor` — native-done gate and the effective capability envelope
 - While supervised: **flat colored panel** below the editor + rich footer
 - `/ml-ui` — cycle panel detail `compact|normal|full` (or `show`/`hide`); shortcut `ctrl+shift+m`

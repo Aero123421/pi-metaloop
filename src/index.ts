@@ -45,6 +45,7 @@ import { decideAbortWait, waitForSettlement } from "./orchestration-lifecycle.ts
 import {
 	buildChatDigest,
 	noApproverReason,
+	prepareResume,
 	runSupervisedTask,
 	type ApprovalDecision,
 	type ApprovalRequest,
@@ -61,7 +62,7 @@ import {
 	ticketIcon,
 	type PanelDetail,
 } from "./tui-panel.ts";
-import type { TaskBoard, UsageStats, Verdict } from "./types.ts";
+import type { OrchestrateInput, TaskBoard, UsageStats, Verdict } from "./types.ts";
 
 const STATUS_KEY = "meta-loop";
 const WIDGET_KEY = "meta-loop-panel";
@@ -80,6 +81,8 @@ const KEEP_RUNS = 20;
 
 interface ActiveOrchestration {
 	runId: string;
+	/** The request this run was started from; persisted so /ml-resume can rebuild prompts. */
+	input: OrchestrateInput;
 	cwd: string;
 	controller: AbortController;
 	startedAt: string;
@@ -352,6 +355,7 @@ export default function (pi: ExtensionAPI) {
 			board: active.board,
 			verdicts: active.verdicts,
 			activity: active.activity,
+			input: active.input,
 			...patch,
 		};
 		try {
@@ -502,6 +506,8 @@ export default function (pi: ExtensionAPI) {
 			constraints?: string;
 			max_tasks?: number;
 			approval?: "always" | "findings" | "off";
+			/** Continue this run's board instead of planning a new one. */
+			resumeFrom?: { board: TaskBoard; retrying: string[]; sourceRunId: string };
 			background: boolean;
 			force?: boolean;
 			/** Tool abort signal — bound to the run controller when provided. */
@@ -624,17 +630,27 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const artifactDir = ensureRunDir(ctx.cwd, runId);
-		const seedBoard: TaskBoard = {
+		const seedBoard: TaskBoard = params.resumeFrom
+			? { ...params.resumeFrom.board, phase: "executing" }
+			: {
+					goal: params.goal,
+					planSummary: "",
+					openQuestions: [],
+					tickets: [],
+					phase: "planning",
+					reviewCount: 0,
+				};
+
+		const runInput = {
 			goal: params.goal,
-			planSummary: "",
-			openQuestions: [],
-			tickets: [],
-			phase: "planning",
-			reviewCount: 0,
+			context: params.context,
+			constraints: params.constraints,
+			max_tasks: params.max_tasks,
 		};
 
 		const orch: ActiveOrchestration = {
 			runId,
+			input: runInput,
 			cwd: ctx.cwd,
 			controller,
 			startedAt,
@@ -695,6 +711,7 @@ export default function (pi: ExtensionAPI) {
 						artifactDir,
 						// UI-independent STOP (headless / other process writing STOP file).
 						stopCheck: () => hasStopRequest(ctx.cwd, runId),
+						resumeBoard: params.resumeFrom?.board,
 						requestApproval: async (request) => {
 							const orch = active;
 							if (!orch || orch.runId !== runId || !canUseOriginSession(orch) || !sessionUi?.hasUI) {
@@ -774,6 +791,7 @@ export default function (pi: ExtensionAPI) {
 					verdicts: result.verdicts,
 					summary: result.summary,
 					usage: result.usage,
+					input: runInput,
 					error:
 						terminal === "completed" || terminal === "stopped"
 							? undefined
@@ -833,6 +851,7 @@ export default function (pi: ExtensionAPI) {
 					finishedAt: new Date().toISOString(),
 					board,
 					verdicts: active?.verdicts ?? [],
+					input: runInput,
 					error: message,
 					summary: `orchestrate failed: ${message}`,
 				};
@@ -1179,6 +1198,53 @@ export default function (pi: ExtensionAPI) {
 				: "Run is still settling; active state and owner lock remain held."
 			ctx.ui.notify(`Stop signal sent (${stopped?.runId ?? "unknown"}). ${suffix}`, "info");
 			paint(ctx);
+		},
+	});
+
+	pi.registerCommand("ml-resume", {
+		description: "Re-run the failed and unfinished tickets of a previous run (/ml-resume <runId>)",
+		handler: async (args, ctx) => {
+			if (!loadConfig(ctx.cwd).enabled) {
+				ctx.ui.notify("pi-meta-loop is disabled", "info");
+				return;
+			}
+			if (active) {
+				ctx.ui.notify(`A supervised run is already active (${active.runId}). Stop it first: /ml-stop`, "warning");
+				return;
+			}
+			const wanted = args.trim();
+			const source = wanted ? readRun(ctx.cwd, wanted) : readLatestRun(ctx.cwd);
+			if (!source) {
+				ctx.ui.notify(wanted ? `No run ${wanted} on disk` : "No previous run to resume", "warning");
+				return;
+			}
+			const prepared = prepareResume(source.board, { runId: source.runId });
+			if (prepared.reason) {
+				ctx.ui.notify(`Nothing to resume in ${source.runId}: ${prepared.reason}`, "info");
+				return;
+			}
+			// A resume re-runs real work; say exactly what before doing it.
+			const proceed = await ctx.ui.confirm(
+				`Resume ${source.runId}?`,
+				[
+					`goal: ${source.goal.slice(0, 160)}`,
+					`retrying ${prepared.retrying.length} ticket(s): ${prepared.retrying.join(", ").slice(0, 200)}`,
+					"completed tickets are left alone",
+				].join("\n"),
+			);
+			if (!proceed) return;
+			const started = await startOrchestration(
+				{
+					goal: source.input?.goal ?? source.goal,
+					context: source.input?.context,
+					constraints: source.input?.constraints,
+					max_tasks: source.input?.max_tasks,
+					resumeFrom: { board: prepared.board, retrying: prepared.retrying, sourceRunId: source.runId },
+					background: true,
+				},
+				ctx,
+			);
+			ctx.ui.notify(started.content[0]?.text ?? "resumed", "info");
 		},
 	});
 

@@ -134,4 +134,7 @@ disables meta-loop and the reason is reported by `/ml-doctor`.
 - The nesting guard is for cooperative paths, not hostile ones.
 - Role subprocesses inherit the host environment because model CLIs need provider
   credentials. Values are never printed by the doctor or logs.
-- After a crash, `session_start` marks the run `stopped`. There is no automatic resume.
+- After a crash, `session_start` marks the run `stopped`. Resuming is manual: `/ml-resume`
+  re-runs the failed and unfinished tickets of a persisted board without re-planning or
+  re-approving, and each retried ticket carries its previous attempts so the Worker is told
+  what has already been tried.

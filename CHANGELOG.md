@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/ml-resume [runId]` — continue a run instead of starting over. The failed, blocked, cancelled
+  and never-started tickets run again; completed work is left alone, because redoing work that
+  succeeded is how a "retry" quietly undoes it. Planning and the approval gate are skipped: the
+  plan was written and approved once, and re-planning would produce different tickets.
+
+  Long tasks fail partway — that is what makes them long tasks — and until now the only way back
+  in was to start from scratch. The board and the evidence were on disk the whole time; only the
+  entrance was missing.
+
+- `Ticket.attempts[]` records what each retried ticket did before, and the retried Worker is told
+  about it explicitly. Without that, a retry is indistinguishable from a first attempt and the
+  Worker repeats the approach that just failed.
+
+- `PersistedRun.input` — the request a run was started from, so a resume can rebuild the prompts
+  the plan was written against. The goal alone did not say what the user actually asked for.
+
 ### Changed
 
 - **"Did the work happen" and "was it checked" are now two answers, not one.** A ticket is
