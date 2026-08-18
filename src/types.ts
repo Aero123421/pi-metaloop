@@ -10,7 +10,7 @@
 export type TicketStatus =
 	| "pending"
 	| "running"
-	| "done"
+	| "completed"
 	| "partial"
 	| "blocked"
 	| "failed"
@@ -22,7 +22,7 @@ export type BoardPhase =
 	| "awaiting-approval"
 	| "executing"
 	| "final-review"
-	| "done"
+	| "completed"
 	| "stopped"
 	| "incomplete"
 	| "degraded"
@@ -127,6 +127,18 @@ export interface Verdict {
 	orchestrator_guidance?: string[];
 }
 
+/**
+ * Whether the run's work was checked, kept apart from whether the work was done.
+ *
+ * These are different questions and folding them into one status made the answer to
+ * both worse: a finished ticket with no verify configured had to be called `partial`,
+ * which reads as "half done" when nothing was half done — only unchecked.
+ */
+export interface RunVerification {
+	status: "verified" | "unverified" | "failed";
+	detail: string;
+}
+
 export interface TaskBoard {
 	goal: string;
 	planSummary: string;
@@ -136,6 +148,8 @@ export interface TaskBoard {
 	verdict?: Verdict;
 	/** Full history persisted with the board (survives reload). */
 	verdictHistory?: Verdict[];
+	/** Whether the run's work was checked. Independent of whether tickets completed. */
+	verification?: RunVerification;
 	reviewCount: number;
 }
 

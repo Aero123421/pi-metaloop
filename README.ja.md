@@ -95,7 +95,7 @@ pi install /path/to/pi-meta-loop
 
 ### 最初にやること
 
-初期状態では **trusted verify が未設定**で、その状態ではどのチケットも `done` に到達できない（設計上、run は必ず `incomplete` で終わる）。最初の実運用の前に verify profile を設定すること:
+初期状態では **trusted verify が未設定**。作業自体は完了するが、どの run も `verified` とは名乗れず、結果は `completed · unverified` として報告される（要約にもそう書かれる）。最初の実運用の前に verify profile を設定すること:
 
 ```text
 /skill:meta-loop-setup     # 対話で config を書き出す
@@ -145,7 +145,9 @@ pi install /path/to/pi-meta-loop
 
 ### trusted verify profile
 
-Native Worker の`done`にはcontroller-side verifyの成功が必須。user configで承認済みargvを定義し、project configはprofile名だけを選ぶ。
+run が `verified` を名乗れるのは、controller 自身の verify が実際に走って通ったときだけ。user config で承認済み argv を定義し、project config は profile 名だけを選ぶ。
+
+**2 つの問いには 2 つの答え。** チケットが仕事をしたかと、それを誰かが検査したかは別の事実なので、別々に報告する。実際に走った verify がそのチケットに帰属する regression を見つけたときだけ、そのチケットが `failed` になる。未設定・中断・実行前から失敗していた verify はチケットに触れず、**run** を `unverified` にして理由を残す。検査されていないものが verified として報告されることはない。
 
 ```jsonc
 // user: ~/.pi/agent/meta-loop/config.json
@@ -166,9 +168,8 @@ Projectから新しいprofileやargvは追加できない。未設定・abort �
 - `supervisor.workerStartThreshold` — Worker 起動数がこの値に達したら監査（標準 6）
 - `supervisor.maxConsecutiveFailures` — この数の連続失敗で即時監査（標準 2）
 - `executor.timeoutSec` — グループごとの壁時計上限（標準 1800）
-- `executor.maxParallel` — 並列実行の上限（native worker は現状直列のため未使用。issue #4 で実装）
 - `executor.verifyProfiles` / `verifyProfile` — user承認済みargvとproject選択
-- `executor.verifyMode` — `per-ticket`（標準）/ `final`。`final` は実行ループ後に1回だけ verify し、`done` を主張したチケットをまとめて昇格させる
+- `executor.verifyMode` — `per-ticket`（標準）/ `final`。`final` は実行ループ後に 1 回だけ verify し、その結果が run の verification になる（1 つのゲートではどのチケットが壊したか言えないので、個別チケットには帰属させない）
 - `evidence.ignoreDirNames` / `parentMaxDepth` / `maxEntries` / `timeoutMs` — evidence スイープの範囲（user/base 層のみ。project 層は変更できない）
 - `limits.maxTasks` — チケット上限（標準 8）
 - `limits.perTaskOutputCap` — サブプロセスごとの出力上限
@@ -207,7 +208,7 @@ npm test
 
 - Orchestrator / Supervisor / Worker のデフォルト tools に **bash は含まれない**。
 - Worker の tools は **built-in の厳密 allowlist**（`read`/`write`/`edit`/`ls`/`find`/`grep`）。native worker は `--no-extensions -e scope-guard` で起動するため、project/user の拡張が tools を上書きできない。`allowed_scope` は write/edit で強制され、実行後に git + filesystem evidence でも検査される。alias/args/config 由来の bash・独自 tool は除去され、bash は tool_call ゲートでも拒否される。
-- ビルド/テストは **controller 側の決定論的 verify**（`verifyProfiles` の argv 配列、shell なし）。未設定・失敗・timeout のとき native `done` は**禁止**される（`evidence.verify` に記録）。
+- ビルド/テストは **controller 側の決定論的 verify**（`verifyProfiles` の argv 配列、shell なし）。実際に走って regression を見つけた verify だけがチケットを `failed` にし、それ以外は run を `unverified` にする（`evidence.verify` と `board.verification` に記録）。
 - **verify profile の承認は、対象リポジトリ自身のコードを実行する許可を意味する。** `["npm","test"]` はそのリポジトリの `package.json` とテストコードが定義したものを実行する。profile が固定するのは*コマンド*であって、その先の中身ではない。手動でテストを走らせてよいと思えるリポジトリに限り、グローバルな `verifyCommands` よりプロジェクトごとの `executor.verifyProfile` 選択を優先すること。
 - `approval.initialPlan` は、書き込みが始まる前に人間が計画を見る条件を決める: `findings`（既定）は監査が clean でないとき、`always` は毎回、`off` は聞かない。project 層は引き上げのみ可能で、`red` 監査はゲートに到達せず run を止める。
 - `limits.scopeCeiling` は各チケットの `allowed_scope` の天井になる。未設定の場合、書き込み範囲は Orchestrator の計画が完全に決める。

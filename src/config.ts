@@ -40,7 +40,6 @@ export function strongerApprovalPolicy(a: ApprovalPolicy, b: ApprovalPolicy): Ap
 
 export interface ExecutorSettings {
 	timeoutSec: number;
-	maxParallel: number;
 	/**
 	 * Controller-side trusted deterministic verify argv lists (no shell).
 	 * Each entry is `[command, ...args]`. Required for native worker `done`.
@@ -209,7 +208,6 @@ const defaultConfig: MetaLoopConfig = {
 	},
 	executor: {
 		timeoutSec: 1800,
-		maxParallel: 4,
 		// unset → native done forbidden until user/base configures trusted verify
 		verifyCommands: undefined,
 		verifyProfiles: {},
@@ -451,10 +449,6 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 				timeoutSec: Math.min(
 					cur.timeoutSec,
 					clampInt(ex.timeoutSec ?? cur.timeoutSec, 30, 86_400),
-				),
-				maxParallel: Math.min(
-					cur.maxParallel,
-					clampInt(ex.maxParallel ?? cur.maxParallel, 1, 16),
 				),
 				verifyProfiles: cur.verifyProfiles,
 				verifyProfile: requestedProfile ?? cur.verifyProfile,

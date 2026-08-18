@@ -48,6 +48,7 @@ import type {
 	VerifyMode,
 	WorkerClaim,
 	RoleRunResult,
+	RunVerification,
 } from "./types.ts";
 
 /** BoardPhase enum values — notify must never assign labels outside this set. */
@@ -57,7 +58,7 @@ const BOARD_PHASES = new Set<string>([
 	"awaiting-approval",
 	"executing",
 	"final-review",
-	"done",
+	"completed",
 	"stopped",
 	"incomplete",
 	"degraded",
@@ -130,7 +131,7 @@ function writeHookArtifact(dir: string | undefined, name: string, content: strin
 /**
  * Final board phase after the execute loop (or early exit).
  * - all done only → done (partial never counts as full success)
- * - any partial/blocked/failed without full success → incomplete (never fake "done")
+ * - any partial/blocked/failed without full success → incomplete (never fake "completed")
  * - empty tickets after plan → plan_failed
  * - user abort → stopped
  */
@@ -145,8 +146,8 @@ export function resolveTerminalPhase(board: TaskBoard, aborted: boolean): BoardP
 	const pending = tickets.some((t) => t.status === "pending" || t.status === "running");
 	if (pending) return "incomplete";
 
-	const allDone = tickets.every((t) => t.status === "done");
-	if (allDone) return "done";
+	const allDone = tickets.every((t) => t.status === "completed");
+	if (allDone) return "completed";
 	return "incomplete";
 }
 
@@ -158,7 +159,7 @@ function notify(hooks: RuntimeHooks, board: TaskBoard, label: string) {
 		const locked =
 			board.phase === "stopped" || board.phase === "degraded" || board.phase === "plan_failed";
 		const incomingTerminal =
-			phase === "stopped" || phase === "degraded" || phase === "plan_failed" || phase === "done" || phase === "incomplete";
+			phase === "stopped" || phase === "degraded" || phase === "plan_failed" || phase === "completed" || phase === "incomplete";
 		if (!locked || incomingTerminal) {
 			board.phase = phase as BoardPhase;
 		}
@@ -377,7 +378,7 @@ function pickNext(board: TaskBoard, newlyBlocked?: Ticket[]): Ticket | null {
 			newlyBlocked?.push(t);
 			continue;
 		}
-		if (deps.every((d) => d.status === "done" || d.status === "partial")) return t;
+		if (deps.every((d) => d.status === "completed" || d.status === "partial")) return t;
 	}
 	return null;
 }
@@ -466,35 +467,24 @@ function parseWorkerClaim(output: string): WorkerClaim {
 	};
 }
 
-/** Marker recorded on tickets whose verify was deferred to the end of the run. */
-export const AWAITING_FINAL_VERIFY =
-	"claimed done; controller verify deferred to the end of the run (executor.verifyMode=final)";
+/** Recorded on `evidence.verify.reason` when the gate runs once at the end of the run. */
+export const DEFERRED_FINAL_VERIFY = "deferred: executor.verifyMode=final";
 
 /** Apply the one shared final verify verdict to a ticket waiting for promotion. */
+/**
+ * Record the shared final gate on a ticket that was waiting for it.
+ *
+ * The status is not touched. One verify covering the whole plan cannot say which
+ * ticket broke what, and marking every waiting ticket `failed` because the tree is
+ * red at the end attributes a single unattributable fact to each of them. Whether
+ * the run is verified is answered once, at run level, by `computeRunVerification`.
+ */
 export function applyFinalVerify(ticket: Ticket, verify: VerifyEvidence): void {
 	ticket.evidence = {
 		...(ticket.evidence ?? { processExitCode: 0, actualChangedFiles: [], scopeViolations: [] }),
 		verify,
 	};
-	delete ticket.evidence.inconclusive;
-	if (verifyAllowsDone(verify)) {
-		ticket.status = "done";
-		ticket.error = undefined;
-	} else if (verify.status === "unset") {
-		ticket.status = "partial";
-		ticket.error = "controller trusted verify not configured; done is forbidden without deterministic verify";
-	} else if (verify.status === "aborted") {
-		ticket.status = "partial";
-		ticket.evidence.inconclusive = true;
-		ticket.error = verify.reason ?? "controller trusted verify aborted; done is forbidden";
-	} else if (verify.preExisting) {
-		ticket.status = "partial";
-		ticket.evidence.inconclusive = true;
-		ticket.error = `final controller verify failed on a command that was already failing when the run started (${verify.failedCommand?.join(" ") ?? "unknown"}); not attributed to this ticket`;
-	} else {
-		ticket.status = "failed";
-		ticket.error = verify.reason ?? `final controller verify ${verify.status}; done is forbidden`;
-	}
+	if (verifyAllowsDone(verify)) ticket.error = undefined;
 }
 
 /** Exported for unit tests of P0 claim/evidence semantics. */
@@ -522,38 +512,33 @@ export function finalizeFromEvidence(
 		return;
 	}
 	if (claim.claimedStatus === "done") {
-		// Done requires controller-side trusted verify (model-independent). Unset/fail/timeout ⇒ not done.
-		if (!verifyAllowsDone(evidence.verify)) {
-			const v = evidence.verify;
-			const status = v?.status ?? "unset";
-			// Inconclusive outcomes are `partial`: not done, but not a Worker fault.
-			// Only a verify that actually ran and reported a regression is `failed`.
-			if (status === "unset") {
-				ticket.status = "partial";
-				ticket.error =
-					opts?.mode === "final"
-						? AWAITING_FINAL_VERIFY
-						: (v?.reason ??
-							"controller trusted verify not configured; done is forbidden without deterministic verify");
-			} else if (status === "aborted") {
-				ticket.status = "partial";
-				evidence.inconclusive = true;
-				ticket.error = v?.reason ?? "controller trusted verify aborted; done is forbidden";
-			} else if (isPreExistingFailure(v, opts?.baseline)) {
-				ticket.status = "partial";
-				// Not the ticket's regression, but not evidence that it worked either.
-				evidence.inconclusive = true;
+		const v = evidence.verify;
+		const status = v?.status ?? "unset";
+		// Verify may only take a ticket down when it actually ran and found a regression
+		// that belongs to this ticket. Whether the run was checked at all is a separate
+		// question, answered once at run level by `computeRunVerification` — folding the
+		// two together is what forced a finished ticket with no verify configured to be
+		// called `partial`, which reads as half-done when nothing was half-done.
+		if (status === "failed" || status === "timeout" || status === "error") {
+			if (isPreExistingFailure(v, opts?.baseline)) {
+				ticket.status = "completed";
+				// Persist the attribution: the run-level verification reads it back to say
+				// why nothing here can be trusted either way.
+				if (v) evidence.verify = { ...v, preExisting: true };
 				ticket.error = `controller trusted verify failed, but the same command was already failing when the run started (${
 					v?.failedCommand?.join(" ") ?? "unknown"
 				}); not attributed to this ticket`;
 			} else {
 				ticket.status = "failed";
-				ticket.error =
-					v?.reason ?? `controller trusted verify ${status}; done is forbidden`;
+				ticket.error = v?.reason ?? `controller trusted verify ${status}`;
 			}
 			return;
 		}
-		ticket.status = "done";
+		ticket.status = "completed";
+		if (status === "unset" && opts?.mode === "final") {
+			// Waiting on the shared final gate, not stalled.
+			evidence.verify = { ...(v ?? { status: "unset" }), reason: DEFERRED_FINAL_VERIFY };
+		}
 		return;
 	}
 	if (claim.claimedStatus === "partial") ticket.status = "partial";
@@ -562,6 +547,74 @@ export function finalizeFromEvidence(
 }
 
 /** Initial/final gates are unbudgeted; every real mid-run call consumes one unit. */
+/**
+ * Was this run's work actually checked?
+ *
+ * Separate from whether tickets completed, and deliberately blunt: a run is only
+ * `verified` when a real gate ran and passed. Everything else is `unverified` with
+ * the reason, so "we did not check" never gets to look like "we checked and it was
+ * fine". `failed` means a gate ran and found a regression.
+ */
+export function computeRunVerification(
+	board: TaskBoard,
+	opts: {
+		verifyConfigured: boolean;
+		verifyMode: VerifyMode;
+		finalVerify?: VerifyEvidence;
+		baseline?: VerifyBaseline;
+	},
+): RunVerification {
+	if (!opts.verifyConfigured) {
+		return {
+			status: "unverified",
+			detail:
+				"verify not configured — completions are unverified. Run /skill:meta-loop-setup to set a verify profile.",
+		};
+	}
+	const regressed = board.tickets.find(
+		(t) =>
+			t.status === "failed" &&
+			t.evidence?.verify &&
+			["failed", "timeout", "error"].includes(t.evidence.verify.status) &&
+			!t.evidence.verify.preExisting,
+	);
+	const finalBad =
+		opts.verifyMode === "final" &&
+		opts.finalVerify &&
+		["failed", "timeout", "error"].includes(opts.finalVerify.status) &&
+		!opts.finalVerify.preExisting;
+	if (regressed || finalBad) {
+		const v = regressed?.evidence?.verify ?? opts.finalVerify;
+		return { status: "failed", detail: `verify failed: ${v?.failedCommand?.join(" ") ?? "unknown command"}` };
+	}
+
+	const completed = board.tickets.filter((t) => t.status === "completed");
+	if (completed.length > 0) {
+		const passed =
+			opts.verifyMode === "final"
+				? opts.finalVerify?.status === "passed"
+				: completed.every((t) => t.evidence?.verify?.status === "passed");
+		if (passed) return { status: "verified", detail: "controller verify passed" };
+	}
+
+	const preExisting = board.tickets.find((t) => t.evidence?.verify?.preExisting) ?? undefined;
+	if (preExisting || opts.finalVerify?.preExisting) {
+		const cmd =
+			preExisting?.evidence?.verify?.failedCommand ?? opts.finalVerify?.failedCommand ?? undefined;
+		return {
+			status: "unverified",
+			detail: `baseline was already failing (${cmd?.join(" ") ?? "unknown command"}) — results not attributable`,
+		};
+	}
+	if (board.tickets.some((t) => t.evidence?.verify?.status === "aborted")) {
+		return { status: "unverified", detail: "verify aborted" };
+	}
+	if (completed.length === 0) {
+		return { status: "unverified", detail: "no completed tickets to verify" };
+	}
+	return { status: "unverified", detail: "verify did not run" };
+}
+
 export function canRunSupervisorAudit(stage: "initial" | "mid" | "final", used: number, maximum: number): boolean {
 	return stage !== "mid" || used < maximum;
 }
@@ -755,8 +808,84 @@ export function noApproverReason(policy: ApprovalPolicy, verdict: string): strin
 	);
 }
 
+
+/**
+ * What goes back into the conversation.
+ *
+ * The full report is written to disk and reachable from `/tasks`; putting it in the
+ * chat as well cost 8-25KB of context per run, most of it the Worker's own prose —
+ * the one thing this harness explicitly does not take at face value. This is the
+ * outcome, the evidence counts, what is unresolved, and where to read the rest.
+ */
+export function buildChatDigest(args: {
+	board: TaskBoard;
+	verdicts: Verdict[];
+	usage: UsageStats;
+	runId: string;
+	status: string;
+}): string {
+	const { board, verdicts, usage, runId, status } = args;
+	const cut = (s: string, n: number) => {
+		const t = (s ?? "").replace(/\s+/g, " ").trim();
+		return t.length <= n ? t : `${t.slice(0, n - 1)}…`;
+	};
+	const count = (...st: string[]) => board.tickets.filter((t) => st.includes(t.status)).length;
+	const verification = board.verification;
+	const lines: string[] = [
+		`[pi-meta-loop] ${status} · ${verification?.status ?? "unverified"} (runId=${runId})`,
+		`goal: ${cut(board.goal, 120)}`,
+		`tickets: ✓${count("completed")} ◐${count("partial")} ■${count("blocked")} ✗${count("failed", "cancelled")} ○${count("pending", "running")} / ${board.tickets.length}`,
+	];
+	if (verification) lines.push(`verification: ${cut(verification.detail, 160)}`);
+	if (verdicts.length) {
+		lines.push(`audit: ${verdicts.map((v) => `${v.stage ?? "?"}:${v.verdict}`).join(" → ")}`);
+	}
+	const findings = [
+		...new Set(verdicts.flatMap((v) => [...(v.required_actions ?? []), ...(v.risk ?? [])])),
+	].filter(Boolean);
+	if (findings.length) {
+		lines.push("findings:");
+		for (const f of findings.slice(0, 3)) lines.push(`  - ${cut(f, 100)}`);
+	}
+	for (const t of board.tickets.slice(0, 8)) {
+		const err = t.error && (t.status === "failed" || t.status === "blocked") ? ` — ${cut(t.error, 80)}` : "";
+		lines.push(`  ${ticketGlyph(t.status)} ${t.id} — ${cut(t.goal, 60)}${err}`);
+	}
+	if (board.tickets.length > 8) lines.push(`  +${board.tickets.length - 8} more`);
+	const unresolved = [...new Set(board.tickets.flatMap((t) => t.claim?.unresolved ?? []))].filter(Boolean);
+	if (unresolved.length) {
+		lines.push("unresolved:");
+		for (const u of unresolved.slice(0, 3)) lines.push(`  - ${cut(u, 100)}`);
+	}
+	lines.push(`usage: $${usage.cost.toFixed(2)} · ${usage.turns} turns`);
+	lines.push(`full report: .pi/meta-loop/runs/${runId}/summary.md · board: /tasks`);
+	if (!(status === "completed" && verification?.status === "verified")) {
+		lines.push(
+			"NOTE: not a verified success — do not report the goal as complete without checking the report.",
+		);
+	}
+	const out = lines.join("\n");
+	return out.length <= 2000 ? out : `${out.slice(0, 1978)}\n…[digest truncated]`;
+}
+
+function ticketGlyph(status: string): string {
+	switch (status) {
+		case "completed":
+			return "✓";
+		case "partial":
+			return "◐";
+		case "blocked":
+			return "■";
+		case "failed":
+		case "cancelled":
+			return "✗";
+		default:
+			return "○";
+	}
+}
+
 export function buildPrimarySummary(board: TaskBoard, verdicts: Verdict[]): string {
-	const done = board.tickets.filter((t) => t.status === "done").length;
+	const done = board.tickets.filter((t) => t.status === "completed").length;
 	const partial = board.tickets.filter((t) => t.status === "partial").length;
 	const failed = board.tickets.filter((t) => t.status === "failed" || t.status === "blocked" || t.status === "cancelled").length;
 	const pending = board.tickets.filter((t) => t.status === "pending" || t.status === "running").length;
@@ -857,6 +986,8 @@ export async function runSupervisedTask(
 	};
 	/** Captured once before the execute loop so pre-existing red is not blamed on a ticket. */
 	let verifyBaseline: VerifyBaseline | undefined;
+	/** The one shared gate, when executor.verifyMode is "final". */
+	let finalVerify: VerifyEvidence | undefined;
 	const runVerify = () =>
 		runControllerVerify({
 			commands: config.executor.verifyCommands,
@@ -1601,7 +1732,7 @@ export async function runSupervisedTask(
 		// systemic problem (git broken, snapshots failing, baseline permanently red)
 		// let the harness walk the whole plan doing nothing and never raise an audit.
 		const inconclusive = ticket.evidence?.inconclusive === true;
-		const ok = finishedStatus === "done" || (finishedStatus === "partial" && !inconclusive);
+		const ok = finishedStatus === "completed" || (finishedStatus === "partial" && !inconclusive);
 		stats.consecutiveFailures = ok ? 0 : stats.consecutiveFailures + 1;
 
 		let event: RuntimeEvent;
@@ -1646,21 +1777,19 @@ export async function runSupervisedTask(
 	// per-ticket gate, so they wait here instead of being forced to `partial`.
 	if (verifyMode === "final" && !stopped && !hooks.signal?.aborted) {
 		const awaiting = board.tickets.filter(
-			(t) => t.status === "partial" && t.error === AWAITING_FINAL_VERIFY,
+			(t) => t.status === "completed" && t.evidence?.verify?.reason === DEFERRED_FINAL_VERIFY,
 		);
 		if (awaiting.length > 0) {
 			notify(hooks, board, "executing: controller verify (final)");
 			const verify = await runVerify();
 			if (verifyBaseline) verify.baselineStatus = verifyBaseline.status;
 			verify.preExisting = isPreExistingFailure(verify, verifyBaseline);
-			const promoted = verifyAllowsDone(verify);
-			for (const t of awaiting) {
-				applyFinalVerify(t, verify);
-			}
+			for (const t of awaiting) applyFinalVerify(t, verify);
+			finalVerify = verify;
 			notify(
 				hooks,
 				board,
-				`executing: final verify ${verify.status} (${promoted ? "promoted" : "held"} ${awaiting.length} ticket(s))`,
+				`executing: final verify ${verify.status} over ${awaiting.length} ticket(s)`,
 			);
 		}
 	}
@@ -1681,10 +1810,16 @@ export async function runSupervisedTask(
 		}
 	}
 
+	board.verification = computeRunVerification(board, {
+		verifyConfigured: (config.executor.verifyCommands?.length ?? 0) > 0,
+		verifyMode,
+		finalVerify,
+		baseline: verifyBaseline,
+	});
 	board.phase = resolveTerminalPhase(board, Boolean(hooks.signal?.aborted));
 	notify(hooks, board, `${board.phase}: summarizing`);
 	const summary = buildPrimarySummary(board, verdicts);
-	const cDone = board.tickets.filter((t) => t.status === "done").length;
+	const cDone = board.tickets.filter((t) => t.status === "completed").length;
 	const cBad = board.tickets.filter((t) =>
 		["failed", "blocked", "cancelled"].includes(t.status),
 	).length;

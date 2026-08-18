@@ -2,7 +2,7 @@
  * Controller-side trusted deterministic verify.
  *
  * Runs configured argv lists with shell:false after a native Worker finishes.
- * Independent of model claims — required before ticket status may become "done".
+ * Independent of model claims — required before ticket status may become "completed".
  */
 import type { VerifyBaseline, VerifyEvidence } from "./types.ts";
 import { spawnManagedProcess } from "./spawn.ts";
@@ -164,7 +164,7 @@ export async function runControllerVerify(opts: {
 	};
 }
 
-/** Whether verify evidence authorizes a claimed "done". */
+/** Whether verify evidence authorizes a claimed "completed". */
 export function verifyAllowsDone(verify: VerifyEvidence | undefined): boolean {
 	return verify?.status === "passed";
 }

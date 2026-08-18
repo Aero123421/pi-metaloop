@@ -34,7 +34,7 @@ function board(over: Partial<TaskBoard> = {}): TaskBoard {
 				allowed_scope: [],
 				forbidden: [],
 				dependencies: [],
-				status: "done",
+				status: "completed",
 			},
 			{
 				id: "t2",

@@ -141,21 +141,22 @@ describe("inconclusive outcomes are not progress", () => {
 		verify,
 	});
 
-	it("marks a pre-existing verify failure inconclusive", () => {
+	it("a pre-existing failure is not charged to the ticket", () => {
 		const t = ticket();
 		const failing: VerifyEvidence = { status: "failed", failedCommand: ["npm", "test"] };
 		finalizeFromEvidence(t, claimDone, evidence(failing), {
 			baseline: { status: "failed", signature: JSON.stringify(["npm", "test"]) },
 		});
-		assert.equal(t.status, "partial");
-		assert.equal(t.evidence?.inconclusive, true);
+		// The command was already red before this ticket ran, so the ticket did its work.
+		// Whether the run as a whole is trustworthy is answered by computeRunVerification.
+		assert.equal(t.status, "completed");
+		assert.match(t.error ?? "", /already failing when the run started/);
 	});
 
-	it("marks an aborted verify inconclusive", () => {
+	it("an aborted verify does not demote a ticket that finished", () => {
 		const t = ticket();
 		finalizeFromEvidence(t, claimDone, evidence({ status: "aborted" }));
-		assert.equal(t.status, "partial");
-		assert.equal(t.evidence?.inconclusive, true);
+		assert.equal(t.status, "completed");
 	});
 
 	it("leaves an ordinary worker-reported partial as real progress", () => {
@@ -165,32 +166,30 @@ describe("inconclusive outcomes are not progress", () => {
 		assert.notEqual(t.evidence?.inconclusive, true);
 	});
 
-	it("a deferred final-verify ticket is not inconclusive", () => {
+	it("a deferred final-verify ticket records the wait on the evidence", () => {
 		const t = ticket();
 		finalizeFromEvidence(t, claimDone, evidence({ status: "unset" }), { mode: "final" });
-		assert.equal(t.status, "partial");
+		assert.equal(t.status, "completed");
 		assert.notEqual(t.evidence?.inconclusive, true);
 	});
 
-	it("marks inconclusive outcomes from the shared final verify", () => {
+	it("the shared final verify records itself without reassigning blame", () => {
+		// One gate covering the whole plan cannot say which ticket broke what, so it must
+		// not mark each waiting ticket failed just because the tree ended red.
 		const aborted = ticket();
+		aborted.status = "completed";
 		applyFinalVerify(aborted, { status: "aborted", reason: "stopped" });
-		assert.equal(aborted.status, "partial");
-		assert.equal(aborted.evidence?.inconclusive, true);
+		assert.equal(aborted.status, "completed");
+		assert.equal(aborted.evidence?.verify?.status, "aborted");
 
 		const preExisting = ticket();
+		preExisting.status = "completed";
 		applyFinalVerify(preExisting, {
 			status: "failed",
 			failedCommand: ["npm", "test"],
 			preExisting: true,
 		});
-		assert.equal(preExisting.status, "partial");
-		assert.equal(preExisting.evidence?.inconclusive, true);
-	});
-
-	it("inconclusive never reaches done", () => {
-		const t = ticket();
-		finalizeFromEvidence(t, claimDone, evidence({ status: "aborted" }));
-		assert.notEqual(t.status, "done");
+		assert.equal(preExisting.status, "completed");
+		assert.equal(preExisting.evidence?.verify?.preExisting, true);
 	});
 });

@@ -1,7 +1,6 @@
 {
 	"config_version": 1,
 	"executor": {
-		"maxParallel": 4,
 		"timeoutSec": 1800,
 		"verifyProfile": "node",
 		"verifyMode": "per-ticket"

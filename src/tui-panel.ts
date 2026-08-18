@@ -145,11 +145,15 @@ export function progressBar(done: number, total: number, width = 16, theme?: The
 	);
 }
 
-function mlTone(status: string, phase: string): Tone {
+function mlTone(status: string, phase: string, verification?: string): Tone {
 	// A parked run needs the eye: nothing moves until someone answers.
 	if (phase === "awaiting-approval") return "warning";
 	if (status === "running" || phase === "executing" || phase === "planning") return "accent";
-	if (status === "done" || phase === "done") return "success";
+	if (status === "completed" || phase === "completed") {
+		// "Finished" and "checked" are different facts; the panel shows both or neither.
+		if (verification === "failed") return "error";
+		return verification === "verified" ? "success" : "warning";
+	}
 	if (status === "incomplete" || phase === "incomplete") return "warning";
 	if (status === "stopped" || phase === "stopped") return "muted";
 	if (status === "error" || phase === "plan_failed" || phase === "degraded") return "error";
@@ -158,7 +162,7 @@ function mlTone(status: string, phase: string): Tone {
 
 export function ticketIcon(status: string): string {
 	switch (status) {
-		case "done":
+		case "completed":
 			return "✓";
 		case "running":
 			return "●";
@@ -176,7 +180,7 @@ export function ticketIcon(status: string): string {
 
 function ticketTone(status: string): Tone {
 	switch (status) {
-		case "done":
+		case "completed":
 			return "success";
 		case "running":
 			return "accent";
@@ -193,6 +197,13 @@ function ticketTone(status: string): Tone {
 
 function verdictTone(v: string): Tone {
 	return v === "green" ? "success" : v === "yellow" ? "warning" : "error";
+}
+
+/** `completed` alone says nothing about whether the work was checked. */
+function terminalLabel(run: PersistedRun): string {
+	if (run.status !== "completed") return run.status;
+	const v = run.board.verification?.status;
+	return v ? `completed · ${v === "failed" ? "verify FAILED" : v}` : "completed";
 }
 
 function spinnerFrame(tick: number): string {
@@ -232,7 +243,7 @@ export function shouldShowPanel(input: PanelInput): boolean {
 	// recent terminal outcome stays visible briefly, then the panel hides itself
 	const hideAfter = input.hideFinishedAfterMs ?? 90_000;
 	const end = Date.parse(input.ml.finishedAt || input.ml.updatedAt || "");
-	if (!Number.isFinite(end)) return input.ml.status !== "done" && input.ml.status !== "stopped";
+	if (!Number.isFinite(end)) return input.ml.status !== "completed" && input.ml.status !== "stopped";
 	return Date.now() - end < hideAfter;
 }
 
@@ -266,14 +277,14 @@ export function buildFooterLine(input: PanelInput): string {
 
 	if (input.ml && (input.ml.status === "running" || shouldShowPanel(input))) {
 		const c = ticketCounts(input.ml.board);
-		const tone = mlTone(input.ml.status, input.ml.board.phase);
+		const tone = mlTone(input.ml.status, input.ml.board.phase, input.ml.board.verification?.status);
 		const run = input.ml;
 		const running = run.status === "running";
 		const segs: Seg[] = [
 			{ s: running ? `${spinnerFrame(input.tick)} ` : `${statusGlyph(run.status)} `, tone },
 			{ s: "meta-loop", tone, bold: true },
 			{ s: " " },
-			{ s: running ? run.board.phase : run.status, tone },
+			{ s: running ? run.board.phase : terminalLabel(run), tone },
 			{ s: "  " },
 			{ s: `${c.done + c.partial}/${c.total || 0}`, tone: "text" },
 		];
@@ -281,6 +292,9 @@ export function buildFooterLine(input: PanelInput): string {
 		if (counters.length > 0) segs.push({ s: " " }, ...counters);
 		const v = run.board.verdict?.verdict;
 		if (v) segs.push({ s: "  audit ", tone: "dim" }, { s: v, tone: verdictTone(v) });
+		if ((run.usage?.cost ?? 0) > 0) {
+			segs.push({ s: `  $${(run.usage?.cost ?? 0).toFixed(2)}`, tone: "dim" });
+		}
 		segs.push({ s: `  ${runElapsed(run)}`, tone: "dim" });
 		parts.push(paint(theme, segs));
 	}
@@ -300,7 +314,7 @@ export function buildPanelLines(input: PanelInput): string[] {
 	if (input.ml) {
 		const run = input.ml;
 		const c = ticketCounts(run.board);
-		const tone = mlTone(run.status, run.board.phase);
+		const tone = mlTone(run.status, run.board.phase, run.board.verification?.status);
 		const running = run.status === "running";
 		const awaiting = run.board.phase === "awaiting-approval";
 		const glyph = awaiting ? phaseGlyph(run.board.phase, "◆") : running ? spinnerFrame(input.tick) : statusGlyph(run.status);
@@ -310,7 +324,7 @@ export function buildPanelLines(input: PanelInput): string[] {
 			{ s: `${glyph} `, tone },
 			{ s: "meta-loop", tone, bold: true },
 			{ s: "   " },
-			{ s: running ? run.board.phase : run.status, tone, bold: true },
+			{ s: running ? run.board.phase : terminalLabel(run), tone, bold: true },
 			{ s: " · ", tone: "dim" },
 			{ s: runElapsed(run), tone: "muted" },
 		];
@@ -361,7 +375,7 @@ export function buildPanelLines(input: PanelInput): string[] {
 					...tickets.filter((t) => t.status === "blocked" || t.status === "failed"),
 					...tickets.filter((t) => t.status === "partial"),
 					...tickets.filter((t) => t.status === "pending"),
-					...tickets.filter((t) => t.status === "done"),
+					...tickets.filter((t) => t.status === "completed"),
 				];
 				const seen = new Set<string>();
 				const list: typeof tickets = [];
@@ -379,7 +393,7 @@ export function buildPanelLines(input: PanelInput): string[] {
 				if (show.length > 0) lines.push("");
 				for (const t of show) {
 					const tt = ticketTone(t.status);
-					const done = t.status === "done";
+					const done = t.status === "completed";
 					// Split the row budget so goal + reason can never run past the edge.
 					const avail = Math.max(12, width - 6 - idCol);
 					const rawErr = (t.status === "blocked" || t.status === "failed") && t.error ? t.error : "";
@@ -405,7 +419,7 @@ export function buildPanelLines(input: PanelInput): string[] {
 			if (act && running) {
 				lines.push("  " + fg(theme, "dim", "› ") + fg(theme, "muted", act));
 			}
-			if (run.error && !running && run.status !== "done") {
+			if (run.error && !running && run.status !== "completed") {
 				lines.push("  " + fg(theme, "error", trunc(run.error, width - 2)));
 			}
 		}
@@ -446,7 +460,7 @@ export function buildPanelLines(input: PanelInput): string[] {
 
 function statusGlyph(status: string): string {
 	switch (status) {
-		case "done":
+		case "completed":
 			return "✓";
 		case "incomplete":
 			return "◐";
@@ -464,7 +478,7 @@ function phaseGlyph(phase: string | undefined, fallback: string): string {
 }
 
 function outcomeSeg(input: PanelInput): Seg {
-	if (input.ml?.status === "done") return { s: "finished OK", tone: "success" };
+	if (input.ml?.status === "completed") return { s: "finished OK", tone: "success" };
 	if (input.ml?.status === "incomplete") return { s: "incomplete — not full success", tone: "warning" };
 	if (input.ml?.status === "error") return { s: "failed", tone: "error" };
 	if (input.ml?.status === "stopped") return { s: "stopped", tone: "muted" };

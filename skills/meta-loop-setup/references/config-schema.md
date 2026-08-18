@@ -33,7 +33,6 @@ Empty `model` = inherit pi default. Used for **pi subprocesses** (Orchestrator /
 {
   "executor": {
     "timeoutSec": 1800,
-    "maxParallel": 4,
 
     "verifyProfiles": {
       "node": [["npm", "test"], ["npm", "run", "typecheck"]],
