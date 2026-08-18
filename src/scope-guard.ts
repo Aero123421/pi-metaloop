@@ -518,7 +518,14 @@ export function inspectBashCommand(
 	return { ok: true };
 }
 
-export default function (pi: ExtensionAPI) {
+/**
+ * Install the tool-call guard on an extension host.
+ *
+ * Split out from the default export so the role-io extension can carry it: a
+ * Worker subprocess loads exactly one `-e` extension, and it needs both the
+ * guard and the submission tool.
+ */
+export function installScopeGuard(pi: ExtensionAPI): void {
 	const cwd = process.env.PI_META_LOOP_CWD || process.cwd();
 	const allowed = parseList(process.env.PI_META_LOOP_ALLOWED_SCOPE);
 	const forbidden = parseList(process.env.PI_META_LOOP_FORBIDDEN);
@@ -542,4 +549,8 @@ export default function (pi: ExtensionAPI) {
 		const result = checkPath(filePath, cwd, allowed, forbidden);
 		if (!result.ok) return { block: true, reason: `pi-meta-loop scope guard: ${result.reason}` };
 	});
+}
+
+export default function (pi: ExtensionAPI) {
+	installScopeGuard(pi);
 }

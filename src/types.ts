@@ -36,6 +36,8 @@ export interface WorkerClaim {
 	assumptions?: string[];
 	notes?: string;
 	raw?: string;
+	/** Which protocol carried the report. A silent fallback should be visible. */
+	source?: "submission" | "fence-fallback";
 }
 
 /** Controller-side trusted verify outcome (model-independent). */

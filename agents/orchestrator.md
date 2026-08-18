@@ -51,26 +51,16 @@ forbidden / context.
 
 ## Output format (strict)
 
-Emit only the following JSON in a ```json fence. No preamble, no postscript.
+Call the `submit_plan` tool exactly once with the complete plan. Do not print the plan as
+prose or in a JSON fence.
 
-```json
-{
-  "summary": "1-3 sentences on how you decomposed it",
-  "open_questions": ["ambiguities, and anything deferred to a later slice"],
-  "tasks": [
-    {
-      "id": "auth-01",
-      "goal": "short goal",
-      "deliverables": ["path to the artifact"],
-      "acceptance": ["short, checkable completion condition"],
-      "allowed_scope": ["paths this ticket may modify"],
-      "forbidden": ["what it must not do"],
-      "dependencies": [],
-      "context": "minimum background for the Worker"
-    }
-  ]
-}
-```
+The tool runs the harness's own validators — ticket ids, dependencies, acceptance, write
+scopes, the scope ceiling and the ticket cap. If it returns an error it lists every problem
+at once: fix them all and call the tool again. You have five attempts.
+
+Fields per ticket: `id`, `goal`, `deliverables[]`, `acceptance[]`, `allowed_scope[]`,
+`forbidden[]`, `dependencies[]`, and optional `context`. The plan also carries `summary` and
+`open_questions[]`.
 
 ## If you are asked to revise
 

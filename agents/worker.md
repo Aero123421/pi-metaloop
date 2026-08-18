@@ -37,17 +37,11 @@ your run, and a change there invalidates the evidence for this ticket.
 
 ## Report format (strict)
 
-End your work with the following JSON in a ```json fence.
+End your work by calling the `submit_report` tool exactly once. Do not print the report as
+a JSON fence.
 
-```json
-{
-  "status": "done | partial | blocked",
-  "changed_files": ["files you changed"],
-  "tests": ["checks you performed and their results"],
-  "unresolved": ["what is still open"],
-  "assumptions": ["assumptions you made"],
-  "notes": "anything else"
-}
-```
+- `status`: `done` | `partial` | `blocked`
+- `changed_files[]`, `tests[]` (checks you actually performed), `unresolved[]`,
+  `assumptions[]`, optional `notes`
 
-If acceptance was not met, report `partial` or `blocked` and put the reason in `unresolved`.
+If acceptance was not met, submit `partial` or `blocked` and put the reason in `unresolved`.
