@@ -29,6 +29,15 @@ export interface SupervisorSettings {
 	maxConsecutiveFailures: number;
 }
 
+export type ApprovalPolicy = "always" | "findings" | "off";
+
+const APPROVAL_RANK: Record<ApprovalPolicy, number> = { off: 0, findings: 1, always: 2 };
+
+/** Layers may tighten the approval gate, never loosen it. */
+export function strongerApprovalPolicy(a: ApprovalPolicy, b: ApprovalPolicy): ApprovalPolicy {
+	return APPROVAL_RANK[a] >= APPROVAL_RANK[b] ? a : b;
+}
+
 export interface ExecutorSettings {
 	timeoutSec: number;
 	maxParallel: number;
@@ -91,6 +100,11 @@ export interface MetaLoopConfig {
 		scopeCeiling?: string[];
 	};
 	/** User/base opt-in allowing project config to choose role models. Default false. */
+	/**
+	 * When the person who asked for the work sees the plan before anything is written.
+	 * A layer may only tighten this, never loosen it.
+	 */
+	approval: { initialPlan: ApprovalPolicy };
 	allowProjectModelOverride: boolean;
 }
 
@@ -180,6 +194,7 @@ function narrowVerifyCommands(
 
 const defaultConfig: MetaLoopConfig = {
 	enabled: true,
+	approval: { initialPlan: "findings" },
 	allowProjectModelOverride: false,
 	roles: {
 		orchestrator: { model: "", tools: [...READ_TOOLS] },
@@ -296,6 +311,16 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 		// project may only disable, not re-enable if user disabled — actually user might enable; project disable ok
 		if (kind === "project") merged.enabled = merged.enabled && layer.enabled;
 		else merged.enabled = layer.enabled;
+	}
+	const requestedApproval = (layer as any).approval?.initialPlan;
+	if (requestedApproval === "always" || requestedApproval === "findings" || requestedApproval === "off") {
+		// Narrow-only, in both directions: a project may raise the gate but never lower it.
+		merged.approval = {
+			initialPlan:
+				kind === "project"
+					? strongerApprovalPolicy(merged.approval.initialPlan, requestedApproval)
+					: requestedApproval,
+		};
 	}
 	if (typeof layer.allowProjectModelOverride === "boolean" && kind !== "project") {
 		// Only user/base layers may hand this decision to project config.
@@ -511,6 +536,7 @@ export function resolveMaxTasksCeiling(configured: number, requested?: number): 
 function cloneDefault(): MetaLoopConfig {
 	return {
 		enabled: defaultConfig.enabled,
+		approval: { ...defaultConfig.approval },
 		allowProjectModelOverride: defaultConfig.allowProjectModelOverride,
 		roles: {
 			orchestrator: { ...defaultConfig.roles.orchestrator, tools: [...(defaultConfig.roles.orchestrator.tools ?? [])] },

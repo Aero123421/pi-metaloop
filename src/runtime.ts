@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { MetaLoopConfig } from "./config.ts";
-import { loadStandards } from "./config.ts";
+import { loadStandards, strongerApprovalPolicy, type ApprovalPolicy } from "./config.ts";
 import {
 	captureGitSnapshot,
 	diffGitSnapshots,
@@ -54,7 +54,7 @@ import type {
 const BOARD_PHASES = new Set<string>([
 	"planning",
 	"initial-review",
-	"revision",
+	"awaiting-approval",
 	"executing",
 	"final-review",
 	"done",
@@ -62,6 +62,7 @@ const BOARD_PHASES = new Set<string>([
 	"incomplete",
 	"degraded",
 	"plan_failed",
+	"plan_rejected",
 ]);
 
 export interface RuntimeHooks {
@@ -80,6 +81,11 @@ export interface RuntimeHooks {
 	 * this undefined and spawns real subprocesses.
 	 */
 	runRole?: typeof runRole;
+	/**
+	 * Ask the person who requested the work to approve the plan. Absent means no
+	 * interactive approver, which is a refusal rather than an implicit yes.
+	 */
+	requestApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
 }
 
 export interface RuntimeResult {
@@ -696,23 +702,57 @@ export function evaluateFilesystemEvidence(
 	return { actualChangedFiles, scopeViolations };
 }
 
-export type VerdictDisposition =
-	| { action: "continue"; guidance: [] }
-	| { action: "revise"; guidance: string[] }
-	| { action: "stop"; guidance: string[]; reason: "red" | "yellow-without-guidance" };
-
 /** Fail-closed Supervisor semantics used by every initial/mid/final audit. */
-export function classifyVerdict(verdict: Verdict): VerdictDisposition {
-	const guidance = [...(verdict.required_actions ?? []), ...(verdict.orchestrator_guidance ?? [])]
-		.map(String)
-		.filter((item) => item.trim().length > 0);
-	if (verdict.verdict === "red") return { action: "stop", guidance, reason: "red" };
-	if (verdict.verdict === "yellow") {
-		return guidance.length > 0
-			? { action: "revise", guidance }
-			: { action: "stop", guidance, reason: "yellow-without-guidance" };
-	}
-	return { action: "continue", guidance: [] };
+/**
+ * What the audit means for the run.
+ *
+ * Two of three production runs died because a yellow verdict routed into a one-shot
+ * automatic revision. The Supervisor's own prompt calls yellow "work continues"; the
+ * harness treated it as terminal. Yellow is findings — recorded, shown to the person
+ * who asked for the work, and never a reason to auto-rewrite the plan.
+ */
+export type AssessmentLevel = "clear" | "findings" | "reject";
+
+export function assessVerdict(v: Verdict): AssessmentLevel {
+	if (v.verdict === "red") return "reject";
+	if (v.verdict === "yellow") return "findings";
+	return "clear";
+}
+
+export type { ApprovalPolicy };
+export { strongerApprovalPolicy };
+
+export function approvalPathFor(
+	policy: ApprovalPolicy,
+	assessment: "clear" | "findings",
+): "auto-approve" | "ask" {
+	if (policy === "off") return "auto-approve";
+	if (policy === "always") return "ask";
+	return assessment === "findings" ? "ask" : "auto-approve";
+}
+
+export interface ApprovalRequest {
+	board: TaskBoard;
+	verdict: Verdict;
+	assessment: "clear" | "findings";
+	canReplan: boolean;
+	replansUsed: number;
+	scopeCeiling?: string[];
+	verifyConfigured: boolean;
+}
+
+export type ApprovalDecision =
+	| { action: "approve" }
+	| { action: "replan"; guidance: string }
+	| { action: "reject"; reason?: string };
+
+/** Refusing to run unattended is the fail-closed answer; the message carries the one-line fix. */
+export function noApproverReason(policy: ApprovalPolicy, verdict: string): string {
+	return (
+		`plan approval required (approval.initialPlan="${policy}", audit=${verdict}) but no interactive ` +
+		'approver is available. Set approval.initialPlan to "off" in ~/.pi/agent/meta-loop/config.json ' +
+		"to run unattended."
+	);
 }
 
 export function buildPrimarySummary(board: TaskBoard, verdicts: Verdict[]): string {
@@ -825,6 +865,10 @@ export async function runSupervisedTask(
 			signal: hooks.signal,
 		});
 	const scopeCeiling = config.limits.scopeCeiling;
+	const approvalPolicy = strongerApprovalPolicy(
+		config.approval.initialPlan,
+		input.approval ?? "off",
+	);
 	const scopeCeilingNote = scopeCeiling?.length
 		? `\n\n## Write-scope ceiling (enforced by the harness)\nEvery allowed_scope entry MUST be inside one of: ${scopeCeiling.join(", ")}\nBroad forms such as "**" or a bare "*.ts" are rejected. A ticket that violates this is blocked before it runs.`
 		: "";
@@ -925,92 +969,87 @@ export async function runSupervisedTask(
 		return false;
 	}
 
-	/** @returns false when output empty/invalid or graph rejects the patch (caller must fail-closed). */
-	async function orchestratorRevise(
-		guidance: string[],
-		reason: string,
-	): Promise<{ ok: true } | { ok: false; reason: string }> {
-		const prompt = [
-			`Supervisor injected guidance during work (reason: ${reason}).`,
-			"Revise ONLY pending tickets. Emit full ticket list JSON.",
-			"You MUST keep all non-pending tickets unchanged (same id/status/fields).",
-			"The revision MUST materially change pending work and leave at least one real pending remediation ticket; an unchanged echo is rejected.",
-			`The full revised board must contain at most ${config.limits.maxTasks} total tickets, including non-pending tickets.`,
-			scopeCeilingNote,
-			"",
-			"## Guidance",
-			guidance.map((g) => `- ${g}`).join("\n"),
-			"",
-			"## Current board (full)",
-			formatBoardForSupervisor(board),
-			"",
-			userRequest(input),
-			orchestratorStandards,
-		].join("\n");
-		const run = await callRole(orchestrator, prompt, {
-			cwd,
-			signal: hooks.signal,
-			timeoutSec: heavyTimeoutSec,
-			outputCap: cap,
-			onProgress: hooks.onActivity,
-		});
-		addUsage(usage, run.usage);
-		reviseAttempts++;
-
-		// Persist before judging. A failed revision blocks every pending ticket and ends
-		// the run; without the raw output that outcome is not diagnosable afterwards,
-		// which is exactly what two production runs left behind.
-		const record = (outcome: string) => {
-			writeHookArtifact(
-				hooks.artifactDir,
-				`revise-attempt-${reviseAttempts}.txt`,
-				[
-					`outcome: ${outcome}`,
-					`reason: ${reason}`,
-					`exitCode: ${run.exitCode}`,
-					"",
-					"## guidance",
-					...guidance.map((g) => `- ${g}`),
-					"",
-					"## raw output",
-					run.output || "(empty)",
-				].join("\n"),
+	/**
+	 * Rebuild the plan from the user's guidance. This runs before any ticket has
+	 * executed, so there is nothing to preserve and nothing to merge — the old
+	 * frozen-ticket merge, and every way it could refuse a revision, is gone.
+	 */
+	async function orchestratorReplan(guidance: string, round: number): Promise<boolean> {
+		const planCap = Math.max(cap, 200_000);
+		let lastErr = "";
+		for (let attempt = 1; attempt <= 2; attempt++) {
+			if (hooks.signal?.aborted) {
+				lastErr = "aborted";
+				break;
+			}
+			const previous = JSON.stringify(
+				{
+					summary: board.planSummary,
+					tasks: board.tickets.map((t) => ({
+						id: t.id,
+						goal: t.goal,
+						deliverables: t.deliverables,
+						acceptance: t.acceptance,
+						allowed_scope: t.allowed_scope,
+						dependencies: t.dependencies,
+					})),
+				},
+				null,
+				1,
 			);
-		};
+			const prompt = [
+				attempt === 1
+					? "REPLAN: the user reviewed your plan and requires changes. Produce a complete new plan."
+					: `RETRY: the previous replan was refused — ${lastErr}`,
+				"",
+				"## User guidance",
+				guidance,
+				"",
+				"## Previous plan (for reference; do not echo it unchanged)",
+				previous,
+				"",
+				`Max ${config.limits.maxTasks} tickets.`,
+				scopeCeilingNote,
+				"",
+				userRequest(input),
+				orchestratorStandards,
+			].join("\n");
 
-		if (run.exitCode !== 0) {
-			record(`rejected: orchestrator exited ${run.exitCode}`);
-			return { ok: false, reason: `orchestrator exited ${run.exitCode}` };
-		}
-		const revised = extractJson<any>(run.output);
-		const tasks = Array.isArray(revised) ? revised : revised?.tasks;
-		if (!Array.isArray(tasks) || tasks.length === 0) {
-			record("rejected: no usable ticket JSON in the output");
-			return { ok: false, reason: "no usable ticket JSON in the revision output" };
-		}
+			const submitName = `replan-${round}-attempt-${attempt}.json`;
+			notify(hooks, board, `planning: replan ${round} attempt ${attempt}/2`);
+			const run = await callRole(orchestrator, prompt, {
+				cwd,
+				signal: hooks.signal,
+				timeoutSec: heavyTimeoutSec,
+				outputCap: planCap,
+				onProgress: hooks.onActivity,
+				extraArgs: ["-e", roleIoPath()],
+				extraEnv: orchestratorEnv(submissionPath(hooks.artifactDir, submitName)),
+			});
+			addUsage(usage, run.usage);
+			writeHookArtifact(hooks.artifactDir, `replan-${round}-attempt-${attempt}.txt`, run.output || "");
 
-		const merged = mergeRevisedTicketsDetailed(board.tickets, tasks, config.limits.maxTasks);
-		if (!merged.ok) {
-			const detail = merged.detail ? `${merged.reason} (${merged.detail})` : merged.reason;
-			record(`rejected: ${detail}`);
-			return { ok: false, reason: detail };
+			const submitted = readSubmission<PlanPayload>(hooks.artifactDir, submitName, "submit_plan");
+			const parsed = parseInitialPlanRun(run, config.limits.maxTasks, submitted?.payload);
+			if (!parsed.ok) {
+				lastErr = parsed.error;
+				continue;
+			}
+			const rejected = parsed.tickets
+				.map((t) => ({ id: t.id, error: validateTicket(t, scopeCeiling) }))
+				.filter((x): x is { id: string; error: string } => Boolean(x.error));
+			if (rejected.length > 0) {
+				lastErr = `tickets the harness would block: ${rejected.map((r) => `${r.id}: ${r.error}`).join("; ")}`;
+				continue;
+			}
+			board.planSummary = parsed.planSummary;
+			board.openQuestions = parsed.openQuestions;
+			board.tickets = parsed.tickets;
+			return true;
 		}
-		// Same gate as planning: a revision may not introduce a ticket the harness would
-		// block, or the "fix" produces a board that stops on its first execute step.
-		const unusable = merged.tickets
-			.map((t) => ({ id: t.id, error: validateTicket(t, scopeCeiling) }))
-			.filter((x): x is { id: string; error: string } => Boolean(x.error));
-		if (unusable.length > 0) {
-			const detail = `revised tickets the harness would block: ${unusable
-				.map((u) => `${u.id}: ${u.error}`)
-				.join("; ")}`;
-			record(`rejected: ${detail}`);
-			return { ok: false, reason: detail };
-		}
-		record("accepted");
-		board.tickets = merged.tickets;
-		if (revised && !Array.isArray(revised) && revised.summary) board.planSummary = revised.summary;
-		return { ok: true };
+		board.planSummary = `[plan failed] replan rejected: ${lastErr}`;
+		writeHookArtifact(hooks.artifactDir, `replan-${round}-failed.txt`, board.planSummary);
+		return false;
 	}
 
 	async function runSupervision(stage: "initial" | "mid" | "final", reason: string): Promise<Verdict | null> {
@@ -1119,113 +1158,27 @@ export async function runSupervisedTask(
 		};
 	}
 
-	type VerdictAction = "stopped" | "continue" | "reaudit";
-
-	async function applyVerdict(
-		verdict: Verdict,
-		reason: string,
-		stage: "initial" | "mid" | "final",
-	): Promise<VerdictAction> {
+	function recordVerdict(verdict: Verdict, stage: "initial" | "mid" | "final"): void {
 		board.reviewCount++;
 		board.verdict = verdict;
-		verdicts.push(verdict);
+		verdicts.push({ ...verdict, stage });
 		board.verdictHistory = [...verdicts];
-		const disposition = classifyVerdict(verdict);
-		// After the execute loop there is nothing left to revise: any pending ticket a
-		// revision produced would never run, so a final yellow could only burn re-audit
-		// rounds and then report `incomplete`. Record the findings instead. The
-		// completion gate is evidence plus verify, not the Supervisor's opinion —
-		// and `red` still stops, because that is a refusal, not advice.
-		if (stage === "final" && verdict.verdict === "yellow") {
-			if (disposition.guidance.length > 0) guidanceLog.push(...disposition.guidance);
-			notify(hooks, board, "final-review: yellow recorded as findings (no post-run revision)");
-			return "continue";
-		}
-		if (disposition.action === "stop") {
-			for (const t of board.tickets) if (t.status === "pending" || t.status === "running") {
-				t.status = "blocked";
-				if (disposition.reason === "yellow-without-guidance") {
-					t.error = t.error || "blocked: Supervisor yellow verdict supplied no required revision guidance";
-				}
-			}
-			board.phase = "stopped";
-			notify(
-				hooks,
-				board,
-				disposition.reason === "red"
-					? "stopped: Supervisor red"
-					: "stopped: Supervisor yellow without revision guidance",
-			);
-			return "stopped";
-		}
-		if (disposition.action === "revise") {
-			guidanceLog.push(...disposition.guidance);
-			notify(hooks, board, "revision: injecting guidance into Orchestrator");
-			const revised = await orchestratorRevise(disposition.guidance, reason);
-			if (!revised.ok) {
-				// Yellow required revision failed → block work and stop (fail closed).
-				// Carry the cause: "revision failed" alone cannot tell a parse problem from a
-				// plan-shape problem from guidance a ticket list cannot express.
-				const cause = `blocked: orchestrator revision rejected after yellow verdict — ${revised.reason}`;
-				for (const t of board.tickets) if (t.status === "pending" || t.status === "running") {
-					t.status = "blocked";
-					t.error = t.error || cause;
-				}
-				board.phase = "stopped";
-				notify(hooks, board, `stopped: revision rejected (${revised.reason})`);
-				return "stopped";
-			}
-			// A revised plan is never trusted without another Supervisor audit.
-			return "reaudit";
-		}
-		return "continue";
+		const guidance = [...(verdict.required_actions ?? []), ...(verdict.orchestrator_guidance ?? [])]
+			.map(String)
+			.filter((g) => g.trim().length > 0);
+		if (guidance.length > 0) guidanceLog.push(...guidance);
 	}
 
-	async function superviseWithReaudit(
-		stage: "initial" | "mid" | "final",
-		reason: string,
-		failClosed: boolean,
-	): Promise<{ action: "stopped" | "continue"; verdict: Verdict | null }> {
-		let lastVerdict: Verdict | null = null;
-		let requiredReaudit = false;
-		for (let attempt = 0; attempt < 4; attempt++) {
-			if (!canRunSupervisorAudit(stage, supervisions, config.limits.maxSupervisions)) {
-				if (!requiredReaudit) return { action: "continue", verdict: lastVerdict };
-				const error = `blocked: required Supervisor re-audit exceeded limits.maxSupervisions=${config.limits.maxSupervisions}`;
-				for (const t of board.tickets) if (t.status === "pending" || t.status === "running") {
-					t.status = "blocked";
-					t.error = t.error || error;
-				}
-				board.phase = "stopped";
-				notify(hooks, board, `stopped: ${error.slice("blocked: ".length)}`);
-				return { action: "stopped", verdict: lastVerdict };
-			}
-			const reviewReason = requiredReaudit ? `${reason}; required revision re-audit ${attempt}` : reason;
-			const verdict = await runSupervision(stage, reviewReason);
-			if (!verdict) {
-				// Once a yellow revision occurred, its re-audit is mandatory even for normally
-				// fail-open mid-run reviews.
-				if (failClosed || requiredReaudit) {
-					board.phase = "degraded";
-					notify(hooks, board, `degraded: ${stage} Supervisor verdict missing/invalid`);
-					return { action: "stopped", verdict: lastVerdict };
-				}
-				return { action: "continue", verdict: null };
-			}
-			lastVerdict = verdict;
-			const action = await applyVerdict(verdict, reviewReason, stage);
-			if (action !== "reaudit") return { action, verdict };
-			requiredReaudit = true;
-		}
-
-		// Bound repeated yellow→revision loops. Exhaustion is a blocked stop, never success.
+	/** Red is a refusal, at every stage. Blocks pending work and stops the run. */
+	function applyReject(stage: "initial" | "mid" | "final"): void {
+		const error =
+			stage === "mid" ? "blocked: Supervisor red verdict (mid-run)" : "blocked: Supervisor red verdict";
 		for (const t of board.tickets) if (t.status === "pending" || t.status === "running") {
 			t.status = "blocked";
-			t.error = t.error || "blocked: required Supervisor re-audit did not converge";
+			t.error = t.error || error;
 		}
 		board.phase = "stopped";
-		notify(hooks, board, "stopped: required Supervisor re-audit did not converge");
-		return { action: "stopped", verdict: lastVerdict };
+		notify(hooks, board, "stopped: Supervisor red");
 	}
 
 	/**
@@ -1252,7 +1205,22 @@ export async function runSupervisedTask(
 			stats.startsSinceReview = 0;
 			return "continue";
 		}
-		return (await superviseWithReaudit("mid", reason, failClosed)).action;
+		const verdict = await runSupervision("mid", reason);
+		if (!verdict) {
+			// Mid-run audits stay fail-open: the gates are the initial and final ones.
+			if (!failClosed) return "continue";
+			board.phase = "degraded";
+			notify(hooks, board, "degraded: mid-run Supervisor verdict missing/invalid");
+			return "stopped";
+		}
+		recordVerdict(verdict, "mid");
+		// Yellow mid-run is findings on the record, not a stop. Guidance is already in
+		// guidanceLog and reaches the final summary; there is no plan rewrite to trigger.
+		if (assessVerdict(verdict) === "reject") {
+			applyReject("mid");
+			return "stopped";
+		}
+		return "continue";
 	}
 
 	// ---------- 1. Plan ----------
@@ -1277,37 +1245,124 @@ export async function runSupervisedTask(
 		};
 	}
 
-	// ---------- 2. Initial supervision (fail-closed; revised plans are re-audited) ----------
-	const initialCycle = await superviseWithReaudit("initial", "initial", true);
-	const initial = initialCycle.verdict;
-	if (!initial) {
-		return {
-			board,
-			verdicts,
-			usage,
-			summary: [
-				"## DEGRADED: initial Supervisor audit failed (fail-closed)",
-				"No valid verdict JSON — execution did not start.",
-				"Retry orchestrate or inspect Supervisor model/logs.",
-				"",
-				buildPrimarySummary(board, verdicts),
-			].join("\n"),
-		};
-	}
-	if (initialCycle.action === "stopped") {
-		return {
-			board,
-			verdicts,
-			usage,
-			summary: [
-				"## STOPPED: Supervisor rejected the plan or required revision failed",
-				`observations: ${initial.observations.join(" / ")}`,
-				`risk: ${initial.risk.join(" / ")}`,
-				`required: ${initial.required_actions.join(" / ")}`,
-				"",
-				buildPrimarySummary(board, verdicts),
-			].join("\n"),
-		};
+	// ---------- 2. Initial supervision + approval ----------
+	// The audit is a model auditing a model. It is worth its cost as a reviewer, and it
+	// is not worth run-ending authority over a plan the person who asked for the work
+	// has not seen: three production runs out of three came back yellow, and each yellow
+	// automatically rewrote the plan until a merge refused the rewrite and the run died.
+	// Red still stops. Yellow is findings, shown to a human who decides.
+	const MAX_REPLANS = 3;
+	let replansUsed = 0;
+	let approvedPlan = false;
+	while (!approvedPlan) {
+		const round = replansUsed;
+		const verdict = await runSupervision("initial", round === 0 ? "initial" : `initial (replan ${round})`);
+		if (!verdict) {
+			board.phase = "degraded";
+			notify(hooks, board, "degraded: initial Supervisor verdict missing/invalid");
+			return {
+				board,
+				verdicts,
+				usage,
+				summary: [
+					"## DEGRADED: initial Supervisor audit failed (fail-closed)",
+					"No usable verdict — execution did not start.",
+					"Retry orchestrate or inspect Supervisor model/logs.",
+					"",
+					buildPrimarySummary(board, verdicts),
+				].join("\n"),
+			};
+		}
+		recordVerdict(verdict, "initial");
+		const assessment = assessVerdict(verdict);
+		if (assessment === "reject") {
+			applyReject("initial");
+			return {
+				board,
+				verdicts,
+				usage,
+				summary: [
+					"## STOPPED: Supervisor red — the plan was refused",
+					`observations: ${verdict.observations.join(" / ")}`,
+					`risk: ${verdict.risk.join(" / ")}`,
+					`required: ${verdict.required_actions.join(" / ")}`,
+					"",
+					buildPrimarySummary(board, verdicts),
+				].join("\n"),
+			};
+		}
+
+		const path = approvalPathFor(approvalPolicy, assessment);
+		let decision: ApprovalDecision;
+		if (path === "auto-approve") {
+			decision = { action: "approve" };
+		} else if (hooks.requestApproval) {
+			notify(hooks, board, "awaiting-approval: user approval required");
+			decision = await hooks.requestApproval({
+				board,
+				verdict,
+				assessment,
+				canReplan: replansUsed < MAX_REPLANS,
+				replansUsed,
+				scopeCeiling,
+				verifyConfigured: (config.executor.verifyCommands?.length ?? 0) > 0,
+			});
+		} else {
+			decision = { action: "reject", reason: noApproverReason(approvalPolicy, verdict.verdict) };
+		}
+
+		if (hooks.signal?.aborted) {
+			board.phase = "stopped";
+			notify(hooks, board, "stopped: aborted while awaiting approval");
+			return { board, verdicts, usage, summary: buildPrimarySummary(board, verdicts) };
+		}
+		if (decision.action === "replan" && replansUsed >= MAX_REPLANS) {
+			decision = { action: "reject", reason: `replan budget exhausted (${MAX_REPLANS})` };
+		}
+
+		if (decision.action === "approve") {
+			approvedPlan = true;
+			break;
+		}
+		if (decision.action === "reject") {
+			board.phase = "plan_rejected";
+			for (const t of board.tickets) if (t.status === "pending" || t.status === "running") {
+				t.status = "cancelled";
+				t.error = t.error || "cancelled: plan not approved";
+			}
+			notify(hooks, board, "plan_rejected: user rejected the plan");
+			return {
+				board,
+				verdicts,
+				usage,
+				summary: [
+					`## PLAN REJECTED${decision.reason ? ` — ${decision.reason}` : ""}`,
+					"No tickets executed.",
+					"",
+					buildPrimarySummary(board, verdicts),
+				].join("\n"),
+			};
+		}
+
+		guidanceLog.push(`user replan guidance: ${decision.guidance}`);
+		replansUsed++;
+		if (!(await orchestratorReplan(decision.guidance, replansUsed))) {
+			board.phase = hooks.signal?.aborted ? "stopped" : "plan_failed";
+			notify(hooks, board, `${board.phase}: replan not usable`);
+			return {
+				board,
+				verdicts,
+				usage,
+				summary: [
+					`## PLAN FAILED (phase: ${board.phase})`,
+					"The replan did not produce a usable ticket list.",
+					board.planSummary,
+					"",
+					buildPrimarySummary(board, verdicts),
+				].join("\n"),
+			};
+		}
+		// A new plan is never trusted without another audit.
 	}
 
 	// ---------- 3. Execute ----------
@@ -1614,7 +1669,16 @@ export async function runSupervisedTask(
 	// Always required after a normally completed/STOP-file execution loop. A host AbortSignal
 	// cannot run a role because runRole is intentionally pre-abort fail-fast.
 	if (!hooks.signal?.aborted) {
-		await superviseWithReaudit("final", "final", true);
+		const verdict = await runSupervision("final", "final");
+		if (!verdict) {
+			board.phase = "degraded";
+			notify(hooks, board, "degraded: final Supervisor verdict missing/invalid");
+		} else {
+			recordVerdict(verdict, "final");
+			// The execute loop is over. Yellow is recorded as findings; red refuses to let
+			// the outcome be reported as progress at all.
+			if (assessVerdict(verdict) === "reject") applyReject("final");
+		}
 	}
 
 	board.phase = resolveTerminalPhase(board, Boolean(hooks.signal?.aborted));

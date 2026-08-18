@@ -19,14 +19,15 @@ export type TicketStatus =
 export type BoardPhase =
 	| "planning"
 	| "initial-review"
-	| "revision"
+	| "awaiting-approval"
 	| "executing"
 	| "final-review"
 	| "done"
 	| "stopped"
 	| "incomplete"
 	| "degraded"
-	| "plan_failed";
+	| "plan_failed"
+	| "plan_rejected";
 
 export interface WorkerClaim {
 	claimedStatus?: "done" | "partial" | "blocked";
@@ -114,6 +115,8 @@ export type VerdictLevel = "green" | "yellow" | "red";
 
 export interface Verdict {
 	verdict: VerdictLevel;
+	/** Which audit produced it. Optional for boards written before it existed. */
+	stage?: "initial" | "mid" | "final";
 	scope?: "overall" | "orchestrator" | "workers" | "harness";
 	observations: string[];
 	risk: string[];
@@ -142,6 +145,8 @@ export interface OrchestrateInput {
 	constraints?: string;
 	discussion?: string;
 	max_tasks?: number;
+	/** Caller-side gate override. May only strengthen the configured policy. */
+	approval?: "always" | "findings" | "off";
 }
 
 export interface UsageStats {

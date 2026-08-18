@@ -244,6 +244,7 @@ Other knobs:
 - `/verdicts` — Supervisor verdict history
 - `/ml-stop` — abort the active supervised run
 - `/ml-runs` — list on-disk runs under `.pi/meta-loop/runs/`
+- `/ml-approve` — review the plan awaiting approval (approve / replan / reject)
 - `/ml-doctor` — native-done gate and the effective capability envelope
 - While supervised: **flat colored panel** below the editor + rich footer
 - `/ml-ui` — cycle panel detail `compact|normal|full` (or `show`/`hide`); shortcut `ctrl+shift+m`
@@ -267,6 +268,7 @@ npm test
 - Worker tools are a **strict built-in allowlist** (`read`/`write`/`edit`/`ls`/`find`/`grep`). Native workers start with `--no-extensions -e scope-guard` so project/user extensions cannot override tools. `allowed_scope` is enforced on write/edit **and** checked after run via git + filesystem evidence. bash/custom tools from alias/args/config are stripped and bash is blocked at the tool_call gate.
 - Build/test is **controller-side deterministic verify** (`verifyProfiles` argv lists, no shell). Unset, failed, or timed-out verify **forbids** native `done` (recorded on `evidence.verify`).
 - **A verify profile authorizes running the target repository's own code.** `["npm","test"]` executes whatever that repository's `package.json` and test files define. The profile system fixes the *command*, not the payload behind it. Keep profiles to repositories you would run tests in by hand, and prefer selecting them per project (`executor.verifyProfile`) over a global `verifyCommands`.
+- `approval.initialPlan` decides when a human sees the plan before anything is written: `findings` (default) asks whenever the audit is not clean, `always` asks every time, `off` never asks. A project layer may only raise it, never lower it, and a `red` audit stops the run without reaching the gate.
 - `limits.scopeCeiling` bounds every ticket's `allowed_scope`. Without it the write surface is chosen entirely by the Orchestrator's plan.
 - A worker whose executor the harness cannot intercept is refused. Scope is enforced at tool-call time, so an executor without that interception could only be checked by post-hoc evidence, which is a detection backstop and not an enforcement mechanism.
 - Project config may only **narrow** capabilities relative to user/defaults: it cannot expand tool allow-lists, introduce verify argv, or **choose role models** (opt in with `allowProjectModelOverride`).

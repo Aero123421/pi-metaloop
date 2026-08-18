@@ -7,6 +7,7 @@
  */
 import { spawnSync } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
 	acquireOwnerLock,
@@ -41,7 +42,13 @@ import {
 	shouldSuggestEscalation,
 } from "./escalation.ts";
 import { decideAbortWait, waitForSettlement } from "./orchestration-lifecycle.ts";
-import { runSupervisedTask } from "./runtime.ts";
+import {
+	noApproverReason,
+	runSupervisedTask,
+	type ApprovalDecision,
+	type ApprovalRequest,
+} from "./runtime.ts";
+import { showApprovalDialog } from "./approval-ui.ts";
 import {
 	buildFooterLine,
 	buildPanelLines,
@@ -85,6 +92,8 @@ interface ActiveOrchestration {
 	originSessionGeneration: number;
 	/** Cross-process owner lock; refresh while live, release only from work finally. */
 	lock: { refresh: () => boolean; release: () => void } | null;
+	/** Set while the run is parked waiting for a human to review the plan. */
+	pendingApproval: { request: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
 }
 
 function formatLockHolder(holder: OwnerLockHolder | null | undefined): string {
@@ -469,6 +478,7 @@ export default function (pi: ExtensionAPI) {
 			context?: string;
 			constraints?: string;
 			max_tasks?: number;
+			approval?: "always" | "findings" | "off";
 			background: boolean;
 			force?: boolean;
 			/** Tool abort signal — bound to the run controller when provided. */
@@ -607,6 +617,7 @@ export default function (pi: ExtensionAPI) {
 			verdicts: [],
 			promise: Promise.resolve(),
 			allowSessionDelivery: true,
+			pendingApproval: null,
 			originSessionGeneration: sessionGeneration,
 			lock: ownerLock,
 		};
@@ -648,6 +659,7 @@ export default function (pi: ExtensionAPI) {
 						context: params.context,
 						constraints: params.constraints,
 						discussion: collectDiscussion(ctx),
+						approval: params.approval,
 					},
 					ctx.cwd,
 					config,
@@ -656,6 +668,45 @@ export default function (pi: ExtensionAPI) {
 						artifactDir,
 						// UI-independent STOP (headless / other process writing STOP file).
 						stopCheck: () => hasStopRequest(ctx.cwd, runId),
+						requestApproval: async (request) => {
+							const orch = active;
+							if (!orch || orch.runId !== runId || !canUseOriginSession(orch) || !sessionUi?.hasUI) {
+								return {
+									action: "reject",
+									reason: noApproverReason(
+										loadConfig(ctx.cwd).approval.initialPlan,
+										request.verdict.verdict,
+									),
+								};
+							}
+							// A background run must not seize the editor. Park the decision, tell the
+							// user where it is, and let them come to it. No worker is running, so
+							// waiting costs nothing but wall-clock.
+							if (params.background) {
+								return await new Promise<ApprovalDecision>((resolve) => {
+									let settled = false;
+									const finish = (d: ApprovalDecision) => {
+										if (settled) return;
+										settled = true;
+										if (active?.runId === runId) active.pendingApproval = null;
+										resolve(d);
+									};
+									orch.pendingApproval = { request, resolve: finish };
+									controller.signal.addEventListener(
+										"abort",
+										() => finish({ action: "reject", reason: "aborted while awaiting approval" }),
+										{ once: true },
+									);
+									sessionUi?.ui.notify(
+										"meta-loop: plan awaiting approval — run /ml-approve to review",
+										"warning",
+									);
+									paint(sessionUi, { force: true });
+								});
+							}
+							const decision = await showApprovalDialog(sessionUi, request, { timeoutMs: 600_000 });
+							return decision ?? { action: "reject", reason: "approval dialog timed out or dismissed" };
+						},
 						onPhase: (board, label) => {
 							if (!active || active.runId !== runId) return;
 							active.board = board;
@@ -829,6 +880,7 @@ export default function (pi: ExtensionAPI) {
 						"",
 						"The main session stays interactive — the user can keep chatting.",
 						"Status: footer + widget below the editor (auto-refresh).",
+						"If the initial audit finds issues, the run pauses as 'awaiting approval' — tell the user to run /ml-approve.",
 						"Commands: /tasks  /ml-stop  /verdicts  /ml-runs",
 						"When finished, a meta-loop-result message is injected automatically.",
 						"Do NOT block waiting; acknowledge start and continue helping the user.",
@@ -868,6 +920,12 @@ export default function (pi: ExtensionAPI) {
 					description: "Abort an in-memory active run; replacement starts only after confirmed settlement",
 				}),
 			),
+			approval: Type.Optional(
+				StringEnum(["always", "findings", "off"] as const, {
+					description:
+						"Plan approval gate. May only strengthen the configured policy, never weaken it.",
+				}),
+			),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			// RPC has a UI bridge but is still an API caller: default it to a
@@ -879,6 +937,7 @@ export default function (pi: ExtensionAPI) {
 					context: params.context,
 					constraints: params.constraints,
 					max_tasks: params.max_tasks,
+					approval: params.approval,
 					background,
 					force: params.force,
 					signal,
@@ -1075,6 +1134,26 @@ export default function (pi: ExtensionAPI) {
 				: "Run is still settling; active state and owner lock remain held."
 			ctx.ui.notify(`Stop signal sent (${stopped?.runId ?? "unknown"}). ${suffix}`, "info");
 			paint(ctx);
+		},
+	});
+
+	pi.registerCommand("ml-approve", {
+		description: "Review the plan awaiting approval (approve / replan / reject)",
+		handler: async (_args, ctx) => {
+			const pending = active?.pendingApproval;
+			if (!pending) {
+				ctx.ui.notify("No plan awaiting approval", "info");
+				return;
+			}
+			const decision = await showApprovalDialog(ctx, pending.request);
+			if (!decision) {
+				// Dismissing the dialog is not a refusal: the run stays parked and the
+				// reviewer can come back to it.
+				ctx.ui.notify("Approval postponed — run /ml-approve when ready", "info");
+				return;
+			}
+			pending.resolve(decision);
+			paint(ctx, { force: true });
 		},
 	});
 

@@ -117,7 +117,7 @@ export function isValidRunId(runId: string): boolean {
 
 /** Map board phase (+ abort) to persisted run status. */
 export function runStatusFromPhase(phase: string, aborted: boolean): RunStatus {
-	if (aborted || phase === "stopped") return "stopped";
+	if (aborted || phase === "stopped" || phase === "plan_rejected") return "stopped";
 	if (phase === "done") return "done";
 	if (phase === "incomplete") return "incomplete";
 	if (phase === "plan_failed" || phase === "degraded") return "error";
