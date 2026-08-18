@@ -1,6 +1,6 @@
 # pi-meta-loop
 
-**Status: release candidate; see `package.json` for the exact version.** Adaptive supervised orchestration for [pi](https://github.com/earendil-works/pi).
+**Status: released; see `package.json` for the exact version.** Adaptive supervised orchestration for [pi](https://github.com/earendil-works/pi).
 
 Short tasks stay lightweight. Long tasks can use a supervised layer (Orchestrator + Supervisor + Workers) with **fail-closed initial audit**, **evidence-based completion**, and **capability separation** (not prompt-only).
 

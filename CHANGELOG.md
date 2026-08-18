@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-18
+
 ### Removed
 
 - The bash command inspector — roughly 450 lines of quote-aware lexer, git subcommand
