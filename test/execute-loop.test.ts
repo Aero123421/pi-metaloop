@@ -17,7 +17,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { defaultConfig } from "../src/config.ts";
-import { runSupervisedTask } from "../src/runtime.ts";
+import { approvalPathFor, assessVerdict, runSupervisedTask, strongerApprovalPolicy } from "../src/runtime.ts";
+import type { ApprovalDecision, ApprovalRequest } from "../src/runtime.ts";
 import type { MetaLoopConfig } from "../src/config.ts";
 import type { RoleRunResult } from "../src/types.ts";
 
@@ -101,56 +102,7 @@ function recorder(reply: (role: string, task: string, nth: number) => string): R
 	};
 }
 
-describe("execute loop: a yellow verdict must not be able to kill the run silently", () => {
-	it("records why a revision was rejected instead of a bare 'revision failed'", async () => {
-		const cwd = tmpCwd();
-		const artifactDir = path.join(cwd, "artifacts");
-		fs.mkdirSync(artifactDir, { recursive: true });
-
-		// The production shape: the Supervisor keeps asking for something a ticket list
-		// cannot express, so the Orchestrator echoes the board back, and the merge
-		// refuses the echo.
-		const rec = recorder((role, _task, nth) => {
-			if (role === "orchestrator") return nth === 1 ? fence(PLAN) : fence(PLAN);
-			if (role === "supervisor") {
-				return fence({
-					verdict: "yellow",
-					scope: "overall",
-					observations: ["the Orchestrator should run the tests itself"],
-					required_actions: ["run npm test from the plan"],
-					orchestrator_guidance: ["add an integration verification step you execute yourself"],
-				});
-			}
-			return WORKER_REPORT;
-		});
-
-		const result = await runSupervisedTask(
-			{ goal: "ship it" },
-			cwd,
-			config(),
-			{ artifactDir, runRole: rec.runRole as never },
-		);
-
-		assert.equal(result.board.phase, "stopped");
-		const blocked = result.board.tickets.filter((t) => t.status === "blocked");
-		assert.ok(blocked.length > 0, "pending work is blocked when a required revision is refused");
-
-		// The cause must reach the ticket. "revision failed" alone is what left two
-		// production runs undiagnosable.
-		assert.match(blocked[0]!.error ?? "", /unchanged-echo/);
-
-		// And it must reach disk, with the raw model output beside it.
-		const artifacts = fs.readdirSync(artifactDir);
-		const revise = artifacts.filter((f) => f.startsWith("revise-attempt-"));
-		assert.ok(revise.length > 0, `expected a revise artifact, saw ${artifacts.join(", ")}`);
-		const body = fs.readFileSync(path.join(artifactDir, revise[0]!), "utf-8");
-		assert.match(body, /unchanged-echo/);
-		assert.match(body, /## raw output/);
-		assert.match(body, /## guidance/);
-
-		cleanup(cwd);
-	});
-
+describe("execute loop: audit outcomes", () => {
 	it("keeps the Supervisor's raw output even when the verdict cannot be parsed", async () => {
 		const cwd = tmpCwd();
 		const artifactDir = path.join(cwd, "artifacts");
@@ -264,35 +216,6 @@ describe("execute loop: a plan the harness would block never reaches the Supervi
 		cleanup(cwd);
 	});
 
-	it("refuses a revision that would introduce an unusable ticket", async () => {
-		const cwd = tmpCwd();
-		const artifactDir = path.join(cwd, "artifacts");
-		fs.mkdirSync(artifactDir, { recursive: true });
-
-		const rec = recorder((role, _task, nth) => {
-			// Plan is fine; the revision the Supervisor forces is not.
-			if (role === "orchestrator") return nth === 1 ? fence(PLAN) : fence(BAD_PLAN);
-			if (role === "supervisor") {
-				return fence({
-					verdict: "yellow",
-					scope: "overall",
-					observations: ["narrow the scope"],
-					orchestrator_guidance: ["drop the write scope"],
-				});
-			}
-			return WORKER_REPORT;
-		});
-
-		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
-			artifactDir,
-			runRole: rec.runRole as never,
-		});
-
-		const blocked = result.board.tickets.filter((t) => t.status === "blocked");
-		assert.ok(blocked.length > 0);
-		assert.match(blocked[0]!.error ?? "", /allowed_scope/);
-		cleanup(cwd);
-	});
 });
 
 describe("execute loop: roles answer through submission tools", () => {
@@ -398,6 +321,191 @@ describe("execute loop: roles answer through submission tools", () => {
 		assert.equal(meta.source, "fence-fallback");
 		const audit = fs.readFileSync(path.join(artifactDir, "supervise-initial-1.txt"), "utf-8");
 		assert.match(audit, /source: fence-fallback/);
+		cleanup(cwd);
+	});
+});
+
+describe("plan approval", () => {
+	const YELLOW = {
+		verdict: "yellow",
+		scope: "overall",
+		observations: ["the scope looks wide"],
+		orchestrator_guidance: ["narrow it"],
+	};
+	const GREEN = { verdict: "green", scope: "overall", observations: [] };
+
+	function planner(verdict: unknown) {
+		return recorder((role) => {
+			if (role === "orchestrator") return fence(PLAN);
+			if (role === "supervisor") return fence(verdict);
+			return WORKER_REPORT;
+		});
+	}
+
+	it("maps verdicts to what the run should do about them", () => {
+		assert.equal(assessVerdict({ verdict: "green" } as never), "clear");
+		assert.equal(assessVerdict({ verdict: "yellow" } as never), "findings");
+		assert.equal(assessVerdict({ verdict: "red" } as never), "reject");
+	});
+
+	it("asks only when the policy says so", () => {
+		assert.equal(approvalPathFor("off", "clear"), "auto-approve");
+		assert.equal(approvalPathFor("off", "findings"), "auto-approve");
+		assert.equal(approvalPathFor("findings", "clear"), "auto-approve");
+		assert.equal(approvalPathFor("findings", "findings"), "ask");
+		assert.equal(approvalPathFor("always", "clear"), "ask");
+		assert.equal(approvalPathFor("always", "findings"), "ask");
+	});
+
+	it("a policy can only be tightened", () => {
+		assert.equal(strongerApprovalPolicy("off", "findings"), "findings");
+		assert.equal(strongerApprovalPolicy("always", "off"), "always");
+		assert.equal(strongerApprovalPolicy("findings", "always"), "always");
+	});
+
+	it("a clean audit runs without stopping to ask", async () => {
+		const cwd = tmpCwd();
+		const rec = planner(GREEN);
+		let asked = 0;
+		await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: rec.runRole as never,
+			requestApproval: async () => {
+				asked++;
+				return { action: "approve" };
+			},
+		});
+		assert.equal(asked, 0, "green must not interrupt the user");
+		assert.ok(rec.roles.includes("worker"));
+		cleanup(cwd);
+	});
+
+	it("findings pause the run, and approval releases it", async () => {
+		const cwd = tmpCwd();
+		const rec = planner(YELLOW);
+		let seen: ApprovalRequest | undefined;
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: rec.runRole as never,
+			requestApproval: async (req) => {
+				seen = req;
+				return { action: "approve" };
+			},
+		});
+		const req = seen as ApprovalRequest | undefined;
+		assert.ok(req, "a yellow audit must reach the reviewer");
+		assert.equal(req!.assessment, "findings");
+		assert.equal(req!.board.tickets.length, 1);
+		assert.equal(req!.verifyConfigured, false);
+		assert.ok(rec.roles.includes("worker"), "approval releases the run");
+		assert.ok(["done", "incomplete"].includes(result.board.phase));
+		cleanup(cwd);
+	});
+
+	it("rejection cancels the plan without running anything", async () => {
+		const cwd = tmpCwd();
+		const rec = planner(YELLOW);
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: rec.runRole as never,
+			requestApproval: async () => ({ action: "reject", reason: "not what I asked for" }),
+		});
+		assert.equal(result.board.phase, "plan_rejected");
+		assert.ok(!rec.roles.includes("worker"));
+		assert.ok(result.board.tickets.every((t) => t.status === "cancelled"));
+		assert.match(result.summary, /PLAN REJECTED/);
+		assert.match(result.summary, /not what I asked for/);
+		cleanup(cwd);
+	});
+
+	it("without an approver the run refuses rather than assuming yes", async () => {
+		const cwd = tmpCwd();
+		const rec = planner(YELLOW);
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: rec.runRole as never,
+		});
+		assert.equal(result.board.phase, "plan_rejected");
+		assert.ok(!rec.roles.includes("worker"));
+		assert.match(result.summary, /no interactive approver/);
+		assert.match(result.summary, /approval\.initialPlan/);
+		cleanup(cwd);
+	});
+
+	it("a replan produces a new plan and audits it again", async () => {
+		const cwd = tmpCwd();
+		const rec = planner(GREEN);
+		let asked = 0;
+		const decisions: ApprovalDecision[] = [
+			{ action: "replan", guidance: "smaller tickets please" },
+			{ action: "approve" },
+		];
+		await runSupervisedTask(
+			{ goal: "ship it", approval: "always" },
+			cwd,
+			config(),
+			{
+				runRole: rec.runRole as never,
+				requestApproval: async () => decisions[asked++]!,
+			},
+		);
+		assert.equal(asked, 2);
+		// plan, replan, and an audit after each: a new plan is never trusted unaudited.
+		assert.equal(rec.roles.filter((r) => r === "orchestrator").length, 2);
+		assert.ok(rec.roles.filter((r) => r === "supervisor").length >= 2);
+		cleanup(cwd);
+	});
+
+	it("the replan budget is finite", async () => {
+		const cwd = tmpCwd();
+		const rec = planner(GREEN);
+		let asked = 0;
+		const result = await runSupervisedTask(
+			{ goal: "ship it", approval: "always" },
+			cwd,
+			config(),
+			{
+				runRole: rec.runRole as never,
+				requestApproval: async () => {
+					asked++;
+					return { action: "replan", guidance: `try again ${asked}` };
+				},
+			},
+		);
+		assert.equal(result.board.phase, "plan_rejected");
+		assert.match(result.summary, /replan budget exhausted/);
+		cleanup(cwd);
+	});
+
+	it("red is a refusal that no policy can approve past", async () => {
+		const cwd = tmpCwd();
+		const rec = planner({ verdict: "red", scope: "overall", observations: ["destructive"] });
+		let asked = 0;
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: rec.runRole as never,
+			requestApproval: async () => {
+				asked++;
+				return { action: "approve" };
+			},
+		});
+		assert.equal(asked, 0, "red never reaches the approval gate");
+		assert.equal(result.board.phase, "stopped");
+		assert.ok(!rec.roles.includes("worker"));
+		cleanup(cwd);
+	});
+
+	it("a mid-run yellow records findings instead of stopping the board", async () => {
+		const cwd = tmpCwd();
+		let supervisions = 0;
+		const rec = recorder((role) => {
+			if (role === "orchestrator") return fence(PLAN);
+			if (role === "supervisor") {
+				supervisions++;
+				return fence(supervisions === 1 ? GREEN : YELLOW);
+			}
+			return WORKER_REPORT;
+		});
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: rec.runRole as never,
+		});
+		assert.ok(rec.roles.includes("worker"));
+		assert.notEqual(result.board.phase, "stopped");
 		cleanup(cwd);
 	});
 });

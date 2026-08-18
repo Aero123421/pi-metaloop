@@ -185,6 +185,7 @@ Projectから新しいprofileやargvは追加できない。未設定・abort �
 - `/verdicts` — Supervisor の判定履歴
 - `/ml-stop` — 実行中の supervised run を中断
 - `/ml-runs` — ディスク上の run 履歴（`.pi/meta-loop/runs/`）
+- `/ml-approve` — 承認待ちの計画をレビュー（承認 / 再計画 / 却下）
 - `/ml-doctor` — native done 条件と、実効的な能力境界
 - supervised 中は **フラットな色付きパネル**とフッターで進捗表示
 - `/ml-ui` — 詳細度 `compact|normal|full`（`show`/`hide` 可）。ショートカット `ctrl+shift+m`
@@ -208,6 +209,7 @@ npm test
 - Worker の tools は **built-in の厳密 allowlist**（`read`/`write`/`edit`/`ls`/`find`/`grep`）。native worker は `--no-extensions -e scope-guard` で起動するため、project/user の拡張が tools を上書きできない。`allowed_scope` は write/edit で強制され、実行後に git + filesystem evidence でも検査される。alias/args/config 由来の bash・独自 tool は除去され、bash は tool_call ゲートでも拒否される。
 - ビルド/テストは **controller 側の決定論的 verify**（`verifyProfiles` の argv 配列、shell なし）。未設定・失敗・timeout のとき native `done` は**禁止**される（`evidence.verify` に記録）。
 - **verify profile の承認は、対象リポジトリ自身のコードを実行する許可を意味する。** `["npm","test"]` はそのリポジトリの `package.json` とテストコードが定義したものを実行する。profile が固定するのは*コマンド*であって、その先の中身ではない。手動でテストを走らせてよいと思えるリポジトリに限り、グローバルな `verifyCommands` よりプロジェクトごとの `executor.verifyProfile` 選択を優先すること。
+- `approval.initialPlan` は、書き込みが始まる前に人間が計画を見る条件を決める: `findings`（既定）は監査が clean でないとき、`always` は毎回、`off` は聞かない。project 層は引き上げのみ可能で、`red` 監査はゲートに到達せず run を止める。
 - `limits.scopeCeiling` は各チケットの `allowed_scope` の天井になる。未設定の場合、書き込み範囲は Orchestrator の計画が完全に決める。
 - ハーネスが介入できない executor の worker は拒否される。scope の執行はツールコール時に行われるので、介入できない executor は事後 evidence でしか確認できず、それは検出のバックストップであって執行機構ではない。
 - project config は user/default に対して能力を**狭めることしかできない**: tool allowlist の拡大、verify argv の追加、そして**役割モデルの選択**はできない（`allowProjectModelOverride` で明示的に許可した場合を除く）。

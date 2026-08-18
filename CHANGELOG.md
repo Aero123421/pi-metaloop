@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **A human approves the plan before anything is written.** The initial audit no longer has
+  run-ending authority over work the person who asked for it has not seen. `red` still stops
+  the run and never reaches the gate; `yellow` is findings, shown to the reviewer;
+  `green` runs without interrupting anyone. `approval.initialPlan` is `findings` by default —
+  ask whenever the audit is not clean — and a project layer may only raise it.
+
+  All three persisted production runs came back yellow, and each yellow automatically
+  rewrote the plan until a merge refused the rewrite and the run died with nothing executed.
+  The same 3/3 rate, routed to a person, is a useful review before every non-trivial plan
+  instead of a coin flip on whether the run survives.
+
+- The revision machinery is gone: `classifyVerdict`, `applyVerdict`, `superviseWithReaudit`,
+  `orchestratorRevise`, `mergeRevisedTickets*` and the pending-fingerprint echo check.
+  Replanning now happens only on the reviewer's instruction and only before execution, so
+  there are no frozen tickets to merge around and no way for a merge rule to end a run.
+  Three replans per run, then the plan is rejected.
+
+- A background run parks instead of seizing the editor: it notifies, shows
+  `awaiting approval` in the panel, and waits for `/ml-approve`. No worker is running, so
+  waiting costs nothing. Without any interactive approver the run refuses rather than
+  assuming yes, and the refusal names the one-line config change that allows unattended runs.
+
+### Added
+
+- `/ml-approve` — review the parked plan: approve, replan with guidance, or reject. Dismissing
+  the dialog postpones rather than decides.
+- `approval` config section and an `approval` parameter on the `orchestrate` tool, which may
+  only strengthen the configured policy.
+- `awaiting-approval` and `plan_rejected` board phases.
+
 ### Added
 
 - Roles answer through schema-checked tools instead of a fenced JSON blob on stdout.

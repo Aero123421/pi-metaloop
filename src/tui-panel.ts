@@ -146,6 +146,8 @@ export function progressBar(done: number, total: number, width = 16, theme?: The
 }
 
 function mlTone(status: string, phase: string): Tone {
+	// A parked run needs the eye: nothing moves until someone answers.
+	if (phase === "awaiting-approval") return "warning";
 	if (status === "running" || phase === "executing" || phase === "planning") return "accent";
 	if (status === "done" || phase === "done") return "success";
 	if (status === "incomplete" || phase === "incomplete") return "warning";
@@ -300,7 +302,8 @@ export function buildPanelLines(input: PanelInput): string[] {
 		const c = ticketCounts(run.board);
 		const tone = mlTone(run.status, run.board.phase);
 		const running = run.status === "running";
-		const glyph = running ? spinnerFrame(input.tick) : statusGlyph(run.status);
+		const awaiting = run.board.phase === "awaiting-approval";
+		const glyph = awaiting ? phaseGlyph(run.board.phase, "◆") : running ? spinnerFrame(input.tick) : statusGlyph(run.status);
 
 		// ── title: what it is, what it is doing, for how long
 		const head: Seg[] = [
@@ -411,7 +414,15 @@ export function buildPanelLines(input: PanelInput): string[] {
 	// ── hint row
 	const busy = input.ml?.status === "running";
 	const left: Seg[] = [];
-	if (busy) {
+	if (input.ml?.board.phase === "awaiting-approval") {
+		left.push(
+			{ s: "awaiting approval", tone: "warning", bold: true },
+			{ s: " · ", tone: "dim" },
+			{ s: "/ml-approve", tone: "accent" },
+			{ s: " · ", tone: "dim" },
+			{ s: "/ml-stop", tone: "warning" },
+		);
+	} else if (busy) {
 		left.push(
 			{ s: "chat OK", tone: "muted" },
 			{ s: " · ", tone: "dim" },
@@ -446,6 +457,10 @@ function statusGlyph(status: string): string {
 		default:
 			return "•";
 	}
+}
+
+function phaseGlyph(phase: string | undefined, fallback: string): string {
+	return phase === "awaiting-approval" ? "◆" : fallback;
 }
 
 function outcomeSeg(input: PanelInput): Seg {

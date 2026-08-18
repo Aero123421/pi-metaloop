@@ -26,6 +26,9 @@
 		"maxParallel": 4,
 		"verifyMode": "per-ticket"
 	},
+	"approval": {
+		"initialPlan": "findings"
+	},
 	"escalation": {
 		"enabled": true,
 		"toolCallThreshold": 20,
