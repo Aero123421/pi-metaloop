@@ -10,8 +10,6 @@ import {
 	mergeRevisedTickets,
 	parseInitialPlanRun,
 	resolveTerminalPhase,
-	sfhStatusFromResult,
-	sfhWriteRequiresAllowedScope,
 	validateTicket,
 } from "../src/runtime.ts";
 import { runStatusFromPhase } from "../src/board-store.ts";
@@ -223,50 +221,6 @@ describe("validateTicket allowed_scope fail-closed", () => {
 		assert.match(err!, /native implementation ticket requires non-empty allowed_scope/);
 	});
 
-	it("sfh ticket may omit allowed_scope when branches+integration present (read path)", () => {
-		const err = validateTicket(
-			baseTicket({
-				execution: "sfh",
-				allowed_scope: [],
-				branches: [{ id: "a", prompt: "work" }],
-				integration: { acceptance: ["merged"] },
-			}),
-		);
-		assert.equal(err, null);
-	});
-
-	it("sfh ticket with explicit write/full branch.access is unsupported without OS sandbox", () => {
-		for (const access of ["write", "full"] as const) {
-			const errEmpty = validateTicket(
-				baseTicket({
-					execution: "sfh",
-					allowed_scope: [],
-					branches: [{ id: "a", prompt: "work", access }],
-					integration: { acceptance: ["merged"] },
-				}),
-			);
-			assert.ok(errEmpty, access);
-			assert.match(errEmpty!, /sandbox|write\/full|unsupported/i, access);
-
-			const errScoped = validateTicket(
-				baseTicket({
-					execution: "sfh",
-					allowed_scope: ["src/**"],
-					branches: [{ id: "a", prompt: "work", access }],
-					integration: { acceptance: ["merged"] },
-				}),
-			);
-			assert.ok(errScoped, access);
-			assert.match(errScoped!, /sandbox|write\/full|unsupported/i, access);
-		}
-	});
-
-	it("sfhWriteRequiresAllowedScope blocks config-resolved write/full with empty scope", () => {
-		assert.ok(sfhWriteRequiresAllowedScope("write", []));
-		assert.ok(sfhWriteRequiresAllowedScope("full", undefined));
-		assert.equal(sfhWriteRequiresAllowedScope("read", []), null);
-		assert.equal(sfhWriteRequiresAllowedScope("write", ["src/**"]), null);
-	});
 });
 
 describe("worker_blocked trigger (blocked dependency path)", () => {
@@ -449,41 +403,5 @@ describe("initial Orchestrator plan process semantics", () => {
 		const parsed = parseInitialPlanRun({ output: validPlan, exitCode: 0 }, 8);
 		assert.equal(parsed.ok, true);
 		if (parsed.ok) assert.deepEqual(parsed.tickets.map((ticket) => ticket.id), ["plan-1"]);
-	});
-});
-
-describe("sfh empty output never done (production classifier)", () => {
-	// Exercise the helper used by executeGroupTicket; do not mirror runtime logic here.
-	it("exit 0 + empty/whitespace stdout → partial", () => {
-		assert.equal(sfhStatusFromResult(0, "", []), "partial");
-		assert.equal(sfhStatusFromResult(0, "   \n\t  ", []), "partial");
-	});
-
-	it("exit 0 + non-empty stdout + clean scope → done", () => {
-		assert.equal(sfhStatusFromResult(0, "integration ok", []), "done");
-	});
-
-	it("exit 0 + scope violations → failed (even with stdout)", () => {
-		assert.equal(sfhStatusFromResult(0, "ok", ["leak.ts"]), "failed");
-	});
-
-	it("nonzero exit → failed", () => {
-		assert.equal(sfhStatusFromResult(1, "partial output", []), "failed");
-		assert.equal(sfhStatusFromResult(1, "", []), "failed");
-	});
-
-	it("empty-stdout path composed with resolveTerminalPhase is incomplete, not done", () => {
-		// Board with only sfh-empty-style partial ticket must not resolve to done.
-		const board = boardOf(["partial"], "final-review");
-		assert.equal(resolveTerminalPhase(board, false), "incomplete");
-		// finalizeFromEvidence path for empty-claim also stays non-done
-		const ticket = baseTicket({ status: "running" });
-		finalizeFromEvidence(
-			ticket,
-			claim({ claimedStatus: "partial", notes: "sfh empty stdout" }),
-			evidence({ processExitCode: 0 }),
-		);
-		assert.equal(ticket.status, "partial");
-		assert.notEqual(ticket.status, "done");
 	});
 });

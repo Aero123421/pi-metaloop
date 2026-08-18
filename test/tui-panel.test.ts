@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { PersistedRun } from "../src/board-store.ts";
-import type { SfhStatus } from "../src/sfh.ts";
 import {
 	buildFooterLine,
 	buildPanelLines,
+	dispWidth,
 	nextDetail,
 	progressBar,
 	shouldShowPanel,
@@ -15,6 +15,7 @@ import type { TaskBoard } from "../src/types.ts";
 const theme = {
 	fg: (_c: string, s: string) => s,
 	bg: (_c: string, s: string) => s,
+	bold: (s: string) => s,
 } as any;
 
 function board(over: Partial<TaskBoard> = {}): TaskBoard {
@@ -67,20 +68,6 @@ function run(over: Partial<PersistedRun> = {}): PersistedRun {
 	};
 }
 
-const sfhRunning: SfhStatus = {
-	state: "running",
-	current_step: "fanout.branch_a",
-	steps_done: 1,
-	cost_usd: 0.12,
-	elapsed_sec: 42,
-	fanout_total: 3,
-	fanout_completed: 1,
-	active_members: { branch_a: "running", branch_b: "pending" },
-	flow: "meta-loop-demo",
-	run_dir: "/tmp/.sfh/runs/x",
-	pid: 1,
-};
-
 describe("tui-panel", () => {
 	it("cycles detail levels", () => {
 		let d: PanelDetail = "compact";
@@ -106,41 +93,89 @@ describe("tui-panel", () => {
 			tick: 3,
 			ml: run(),
 			live: { label: "executing: t2", activity: "writing tests..." },
-			sfh: null,
 		});
 		const blob = lines.join("\n");
 		assert.match(blob, /meta-loop/);
-		assert.match(blob, /RUNNING|running/i);
+		assert.match(blob, /executing/);
 		assert.match(blob, /t2/);
 		assert.match(blob, /chat OK/);
 		assert.match(blob, /\/ml-ui/);
 	});
 
-	it("merges sfh into same panel", () => {
-		const lines = buildPanelLines({
-			theme,
-			detail: "full",
-			tick: 1,
-			ml: run(),
-			sfh: sfhRunning,
-		});
-		const blob = lines.join("\n");
-		assert.match(blob, /sfh/);
-		assert.match(blob, /fanout|fan/i);
-		assert.match(blob, /branch_a/);
-		assert.match(blob, /meta-loop/);
-	});
-
-	it("footer includes ML and SFH", () => {
+	it("footer names the run", () => {
 		const footer = buildFooterLine({
 			theme,
 			detail: "normal",
 			tick: 0,
 			ml: run(),
-			sfh: sfhRunning,
 		});
-		assert.match(footer, /ML/);
-		assert.match(footer, /SFH/);
+		assert.match(footer, /meta-loop/);
+		assert.match(footer, /executing/);
+	});
+
+	it("never draws past the requested width, including full-width text", () => {
+		const jp = run({
+			goal: "エビデンス帰属の是正と最終検証モードの追加をオーケストレーターに適用する",
+			activity: "src/evidence.ts を編集中 — ワークツリーを走査（1284 件）",
+			board: board({
+				tickets: [
+					{
+						id: "t1-足場",
+						goal: "モジュールの足場を作り設定ローダーを配線する",
+						deliverables: [],
+						acceptance: ["a"],
+						allowed_scope: [],
+						forbidden: [],
+						dependencies: [],
+						status: "running",
+					},
+					{
+						id: "t2-verify-gate-wiring-long-id",
+						goal: "信頼された verify ゲートを配線する",
+						deliverables: [],
+						acceptance: ["a"],
+						allowed_scope: [],
+						forbidden: [],
+						dependencies: [],
+						status: "blocked",
+						error: "依存パッケージが見つからない",
+					},
+				],
+			}),
+		});
+		for (const width of [44, 50, 78, 120]) {
+			for (const detail of ["compact", "normal", "full"] as PanelDetail[]) {
+				const lines = buildPanelLines({ theme, detail, tick: 0, ml: jp, width });
+				for (const line of lines) {
+					assert.ok(
+						dispWidth(line) <= width,
+						`detail=${detail} width=${width} overflowed by ${dispWidth(line) - width}: ${line}`,
+					);
+				}
+			}
+		}
+	});
+
+	it("clamps absurd widths instead of collapsing", () => {
+		const lines = buildPanelLines({ theme, detail: "normal", tick: 0, ml: run(), width: 4 });
+		assert.ok(lines.length > 0);
+		for (const line of lines) assert.ok(dispWidth(line) <= 44);
+	});
+
+	it("omits zero counters", () => {
+		const blob = buildPanelLines({ theme, detail: "normal", tick: 0, ml: run(), width: 78 }).join("\n");
+		assert.match(blob, /✓1/);
+		assert.ok(!blob.includes("✗0"));
+		assert.ok(!blob.includes("■0"));
+		const footer = buildFooterLine({ theme, detail: "normal", tick: 0, ml: run() });
+		assert.ok(!footer.includes("✗0"));
+	});
+
+	it("dispWidth counts full-width and combining characters", () => {
+		assert.equal(dispWidth("abc"), 3);
+		assert.equal(dispWidth("あい"), 4);
+		assert.equal(dispWidth("あa"), 3);
+		assert.equal(dispWidth(""), 0);
 	});
 
 	it("hides old finished runs unless forced", () => {
@@ -160,30 +195,4 @@ describe("tui-panel", () => {
 		);
 	});
 
-	it("always shows while sfh running", () => {
-		assert.equal(
-			shouldShowPanel({
-				theme,
-				detail: "compact",
-				tick: 0,
-				ml: null,
-				sfh: sfhRunning,
-			}),
-			true,
-		);
-	});
-
-	it("does not show panel for terminal sfh alone (ghost)", () => {
-		const failed = { ...sfhRunning, state: "failed" as const };
-		assert.equal(
-			shouldShowPanel({
-				theme,
-				detail: "compact",
-				tick: 0,
-				ml: null,
-				sfh: failed,
-			}),
-			false,
-		);
-	});
 });

@@ -1,23 +1,8 @@
 {
 	"config_version": 1,
 	"executor": {
-		"sfhAllowedTools": ["pi", "opencode"],
 		"maxParallel": 4,
 		"timeoutSec": 1800,
-		"sfhAccess": "read",
-		"sfhToolAccess": {
-			"pi": "read",
-			"opencode": "read"
-		},
-		"sfhToolModels": {
-			"pi": "",
-			"opencode": ""
-		},
-		"sfhToolEfforts": {
-			"pi": "",
-			"opencode": ""
-		},
-		"sfhIntegrateAccess": "read",
 		"verifyProfile": "node",
 		"verifyMode": "per-ticket"
 	},

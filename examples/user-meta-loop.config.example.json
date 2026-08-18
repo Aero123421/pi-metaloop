@@ -14,19 +14,8 @@
 		}
 	},
 	"executor": {
-		"sfhEnabled": true,
-		"sfhBinary": "sfh",
 		"timeoutSec": 1800,
 		"maxParallel": 4,
-		"sfhModel": "",
-		"sfhIntegrateModel": "",
-		"sfhIntegrateTool": "",
-		"sfhToolModels": {
-			"pi": "qwen-token-plan/qwen3.8-max-preview",
-			"opencode": "",
-			"codex": "",
-			"claude": ""
-		},
 		"verifyProfiles": {
 			"node": [
 				[

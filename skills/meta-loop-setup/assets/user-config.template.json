@@ -12,34 +12,8 @@
 		}
 	},
 	"executor": {
-		"sfhEnabled": true,
-		"sfhBinary": "sfh",
 		"timeoutSec": 1800,
 		"maxParallel": 4,
-		"sfhModel": "",
-		"sfhEffort": "",
-		"sfhAccess": "read",
-		"sfhToolModels": {
-			"pi": "",
-			"opencode": "",
-			"codex": "",
-			"claude": ""
-		},
-		"sfhToolEfforts": {
-			"pi": "",
-			"opencode": "",
-			"codex": "",
-			"claude": ""
-		},
-		"sfhToolAccess": {
-			"pi": "read",
-			"opencode": "read",
-			"codex": "read",
-			"claude": "read"
-		},
-		"sfhIntegrateModel": "",
-		"sfhIntegrateEffort": "",
-		"sfhIntegrateAccess": "read",
 		"verifyProfiles": {
 			"node": [["npm", "test"], ["npm", "run", "typecheck"]],
 			"rust": [["cargo", "test", "--locked"], ["cargo", "clippy", "--locked", "--", "-D", "warnings"]],

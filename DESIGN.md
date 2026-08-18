@@ -19,11 +19,9 @@ capability boundaries.
 | Orchestrator | read, ls, find, grep (**no bash**) |
 | Supervisor | read, ls, find, grep (**no bash**) |
 | Worker | read, write, edit, ls, find, grep (**no bash**; interceptable built-ins only) |
-| sfh group | **read-only review** (write/full is refused without an OS sandbox) |
 
-- A project layer may only **narrow** what user/default config grants. It cannot change
-  `sfhBinary`, raise access, expand tool allowlists, introduce verify argv, or **choose role
-  models** (unless user config sets `allowProjectModelOverride`). Evidence bounds are user-only in
+- A project layer may only **narrow** what user/default config grants. It cannot expand tool
+  allowlists, introduce verify argv, or **choose role models** (unless user config sets `allowProjectModelOverride`). Evidence bounds are user-only in
   both directions.
 - A native Worker's effective tools are the strict intersection with `WORKER_TOOLS`. It launches
   with `--no-extensions` plus the scope guard only, and the `tool_call` guard refuses bash
@@ -68,8 +66,8 @@ at the same time.
 
 ## Auditing
 
-- Initial and final audits get the **full ticket JSON** (acceptance / scope / branches / claim /
-  evidence, including the verify verdict). Mid-run audits get a **compact board** and no
+- Initial and final audits get the **full ticket JSON** (acceptance / scope / claim / evidence,
+  including the verify verdict). Mid-run audits get a **compact board** and no
   standards section, deliberately, to keep a triggered check cheap.
 - The initial audit is **fail-closed**: invalid JSON or a non-zero exit means execution does not
   start.
@@ -106,7 +104,7 @@ disables meta-loop and the reason is reported by `/ml-doctor`.
 - **In the TUI, `orchestrate` runs in the background by default** — the tool returns immediately
   and the chat stays usable.
 - On completion a `meta-loop-result` message is injected via `sendMessage({ followUp, triggerTurn })`.
-- Startup warns when verify is unconfigured or unsupported sfh access is set; the run still proceeds.
+- Startup warns when verify is unconfigured; the run still proceeds.
 - Stopping: `/ml-stop` (AbortController), a `STOP` file, or `force`.
 - State: footer + `belowEditor` widget + `/tasks` and `/ml-runs`. `/tasks <ticket-id>` for detail.
 - Board persistence: `.pi/meta-loop/runs/<runId>/board.json` + `latest.json`, newest 20 retained.
@@ -119,16 +117,16 @@ disables meta-loop and the reason is reported by `/ml-doctor`.
 
 - Per-command bash denylists do not converge, so a scoped native Worker gets no bash at all
   (built-ins + scope + evidence instead).
-- sfh write/full cannot have its scope enforced without an OS sandbox, so it is refused;
-  read-only review only.
-- sfh group completion is `exit 0` + non-empty stdout. `integration.acceptance` is **not**
-  verified — asymmetric with native completion, and an accepted trade-off for investigation work.
+- Only the native pi worker exists as an executor. Scope is enforced by intercepting tool calls,
+  which is specific to pi; an executor without that interception could only be checked by the
+  post-hoc sweep, which is a detection backstop rather than enforcement. Multi-CLI workers are
+  tracked in issue #4 and must answer that question before they ship.
 - Approving a verify profile authorizes running the target repository's own code (see SECURITY.md).
 - Without `limits.scopeCeiling`, the write surface is decided by model output.
 - If the Primary edits the same files during a background run, Worker and Primary can still
   conflict. Narrowing the evidence sweep removed the false positives, not this real overlap.
 - There is no wall-clock Supervisor inside a running ticket; supervision happens at ticket boundaries.
 - The nesting guard is for cooperative paths, not hostile ones.
-- Role and SFH subprocesses inherit the host environment because model CLIs need provider
+- Role subprocesses inherit the host environment because model CLIs need provider
   credentials. Values are never printed by the doctor or logs.
 - After a crash, `session_start` marks the run `stopped`. There is no automatic resume.

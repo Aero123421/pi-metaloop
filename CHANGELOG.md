@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+### Removed
+
+- The sfh executor. `execution: "sfh"` group tickets, the flow YAML generator, the machine-contract
+  probe, the `/sfh` command, the panel's sfh block, twelve `executor.sfh*` settings and the CI
+  contract matrix are gone; the extension now runs standalone with no external harness.
+
+  The measured case: not one of the three persisted runs in `.pi/meta-loop/runs/` used an sfh
+  ticket — all 22 were native — while sfh accounted for 12 of the 15 `executor` settings, 726
+  dedicated lines and roughly 274 references across eight other source files. The decisive reason
+  is not size: an sfh ticket reached `done` on `exit 0 && non-empty stdout`, skipping the
+  controller verify that a native `done` requires, and `integration.acceptance` was never checked.
+  A fail-closed harness cannot keep one non-fail-closed executor.
+
+  Multi-vendor parallel work is worth having, and it comes back as a built-in multi-CLI executor
+  (pi / codex / claude / cursor / grok / agy / opencode) under the harness's own completion rule —
+  tracked in issue #4.
+
+- `unsupportedSfhAccessSettings`, the sfh access-ceiling machinery, and the branch/integration
+  ticket fields. `Ticket.execution` stays as the extension point but only accepts `"native"`;
+  a ticket declaring anything else is refused at validation rather than silently run as native.
+
+### Changed
+
+- `/ml-doctor` no longer reports sfh preflight; it reports the verify gate and the effective
+  capability envelope.
+- `executor.maxParallel` is now unused: it only ever reached sfh flows, and native tickets run
+  serially. Native parallelism lands with issue #4.
+
+### Changed
+
+- The below-editor panel is flat rather than boxed. The old frame drew a `╭─` and a `╰─`
+  with no verticals and no right edge, and its rules were a fixed 42 columns while the rows
+  ran past 78, so the "box" never lined up with anything. Hierarchy is now indent, weight
+  and color, and the panel is laid out against the real terminal width.
+- Every column is measured in display cells, so a full-width Japanese goal or ticket id no
+  longer pushes the right-hand column off the edge. A ticket row splits its budget between
+  goal and failure reason instead of letting the reason overflow the panel.
+- The status row, the panel header and the ticket list no longer each repeat the run state,
+  and counters that are zero are omitted rather than shown as `✗0 ■0`.
+- The progress bar drops its `[ ]` brackets; the empty bar is not drawn before a plan exists.
+- `/tasks` uses the panel's glyphs and id column so the two surfaces read as one UI.
+
 ## [0.3.0-rc.2] - 2026-08-12
 
 ### Fixed

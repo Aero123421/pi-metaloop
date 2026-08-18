@@ -4,13 +4,7 @@
 	"executor": {
 		"maxParallel": 3,
 		"verifyProfile": "node",
-		"verifyMode": "per-ticket",
-		"sfhAllowedTools": [
-			"pi"
-		],
-		"sfhToolModels": {
-			"pi": ""
-		}
+		"verifyMode": "per-ticket"
 	},
 	"limits": {
 		"maxTasks": 6

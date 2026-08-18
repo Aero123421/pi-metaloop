@@ -25,9 +25,8 @@ const required = [
 	{ label: "verify payload warning", en: /repository's own code/i, ja: /リポジトリ自身のコード/ },
 	{ label: "scope ceiling", en: /scopeCeiling/, ja: /scopeCeiling/ },
 	{ label: "project cannot choose models", en: /allowProjectModelOverride/, ja: /allowProjectModelOverride/ },
-	{ label: "sfh read-only without sandbox", en: /read-only review/i, ja: /read-only review/i },
+	{ label: "scope enforced at tool-call time", en: /tool-call time/i, ja: /ツールコール時/ },
 	{ label: "nesting guard is not a hostile boundary", en: /not\*{0,2} a \*{0,2}hostile/i, ja: /敵対的なセキュリティ境界ではない/ },
-	{ label: "sfh is optional", en: /SimpleFlowHarness\).* — optional\*\*/, ja: /SimpleFlowHarness\).* — 任意\*\*/ },
 	{ label: "first-run verify guidance", en: /no trusted verify configured/i, ja: /trusted verify が未設定/ },
 ];
 

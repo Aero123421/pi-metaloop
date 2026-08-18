@@ -318,7 +318,7 @@ function ensureMetaLoopRunsRoot(cwd: string): string {
 
 /**
  * Create/validate a real non-symlink directory under `.pi/meta-loop/<segments>`.
- * Used by board artifacts and sfh flow writes alike.
+ * Used by every board artifact write.
  */
 export function ensureMetaLoopSubdir(cwd: string, ...segments: string[]): string {
 	if (segments.length === 0) {

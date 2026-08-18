@@ -30,23 +30,8 @@ export interface SupervisorSettings {
 }
 
 export interface ExecutorSettings {
-	sfhEnabled: boolean;
-	sfhBinary: string;
 	timeoutSec: number;
 	maxParallel: number;
-	sfhModel?: string;
-	sfhIntegrateModel?: string;
-	sfhToolModels?: Record<string, string>;
-	sfhEffort?: string;
-	sfhToolEfforts?: Record<string, string>;
-	sfhIntegrateEffort?: string;
-	/** Explicit tool for the sfh integrate step; otherwise inferred from the model id. */
-	sfhIntegrateTool?: string;
-	sfhAccess?: string;
-	sfhToolAccess?: Record<string, string>;
-	sfhIntegrateAccess?: string;
-	/** undefined is unrestricted; [] denies every sfh preset tool. */
-	sfhAllowedTools?: string[];
 	/**
 	 * Controller-side trusted deterministic verify argv lists (no shell).
 	 * Each entry is `[command, ...args]`. Required for native worker `done`.
@@ -79,13 +64,6 @@ export interface EvidenceSettings {
 	timeoutMs: number;
 }
 
-/** Access ceilings captured after base (repo/user/global) layers. Project/ticket cannot raise above these. */
-export interface SfhAccessCeiling {
-	sfhAccess: string;
-	sfhToolAccess: Record<string, string>;
-	sfhIntegrateAccess: string;
-}
-
 export interface MetaLoopConfig {
 	enabled: boolean;
 	roles: {
@@ -112,11 +90,6 @@ export interface MetaLoopConfig {
 		 */
 		scopeCeiling?: string[];
 	};
-	/**
-	 * Base-layer (user/global) sfh access ceilings.
-	 * Applied as min() over tool map / branch.access / integrate resolution so project or ticket cannot escalate.
-	 */
-	sfhAccessCeiling?: SfhAccessCeiling;
 	/** User/base opt-in allowing project config to choose role models. Default false. */
 	allowProjectModelOverride: boolean;
 }
@@ -183,25 +156,6 @@ function normalizeVerifyMode(raw: unknown): VerifyMode | undefined {
 	return raw === "final" || raw === "per-ticket" ? raw : undefined;
 }
 
-/**
- * Settings that resolve to `write`/`full` sfh access. That access is refused at
- * plan and execute time (no OS sandbox can enforce scope), so surfacing it up
- * front turns a late, unactionable ticket failure into one clear warning.
- *
- * The access-resolution ceilings stay intact rather than being clamped here, so
- * the privilege model is still exercised and ready if a sandbox lands.
- */
-export function unsupportedSfhAccessSettings(config: MetaLoopConfig): string[] {
-	const ex = config.executor;
-	const mutating = (value: string | undefined) => value === "write" || value === "full";
-	const found: string[] = [];
-	if (mutating(ex.sfhAccess)) found.push(`executor.sfhAccess=${ex.sfhAccess}`);
-	if (mutating(ex.sfhIntegrateAccess)) found.push(`executor.sfhIntegrateAccess=${ex.sfhIntegrateAccess}`);
-	for (const [tool, value] of Object.entries(ex.sfhToolAccess ?? {})) {
-		if (mutating(value)) found.push(`executor.sfhToolAccess.${tool}=${value}`);
-	}
-	return found;
-}
 
 function normalizeVerifyProfiles(raw: unknown): Record<string, string[][]> | undefined {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
@@ -239,20 +193,8 @@ const defaultConfig: MetaLoopConfig = {
 		maxConsecutiveFailures: 2,
 	},
 	executor: {
-		sfhEnabled: true,
-		sfhBinary: "sfh",
 		timeoutSec: 1800,
 		maxParallel: 4,
-		sfhModel: "",
-		sfhIntegrateModel: "",
-		sfhToolModels: {},
-		sfhEffort: "",
-		sfhToolEfforts: {},
-		sfhIntegrateEffort: "",
-		sfhIntegrateTool: "",
-		sfhAccess: "read",
-		sfhToolAccess: {},
-		sfhIntegrateAccess: "read",
 		// unset → native done forbidden until user/base configures trusted verify
 		verifyCommands: undefined,
 		verifyProfiles: {},
@@ -481,7 +423,6 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 				: undefined;
 			merged.executor = {
 				...cur,
-				sfhEnabled: ex.sfhEnabled === false ? false : cur.sfhEnabled,
 				timeoutSec: Math.min(
 					cur.timeoutSec,
 					clampInt(ex.timeoutSec ?? cur.timeoutSec, 30, 86_400),
@@ -490,23 +431,6 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 					cur.maxParallel,
 					clampInt(ex.maxParallel ?? cur.maxParallel, 1, 16),
 				),
-				sfhModel: typeof ex.sfhModel === "string" ? ex.sfhModel : cur.sfhModel,
-				sfhIntegrateModel: typeof ex.sfhIntegrateModel === "string" ? ex.sfhIntegrateModel : cur.sfhIntegrateModel,
-				sfhEffort: typeof ex.sfhEffort === "string" ? ex.sfhEffort : cur.sfhEffort,
-				sfhIntegrateEffort: typeof ex.sfhIntegrateEffort === "string" ? ex.sfhIntegrateEffort : cur.sfhIntegrateEffort,
-				sfhIntegrateTool: typeof ex.sfhIntegrateTool === "string" ? ex.sfhIntegrateTool : cur.sfhIntegrateTool,
-				sfhAccess:
-					ex.sfhAccess === undefined ? cur.sfhAccess : minAccess(cur.sfhAccess, ex.sfhAccess),
-				sfhIntegrateAccess:
-					ex.sfhIntegrateAccess === undefined
-						? cur.sfhIntegrateAccess
-						: minAccess(cur.sfhIntegrateAccess ?? "read", ex.sfhIntegrateAccess),
-				sfhAllowedTools: intersectAllowList(cur.sfhAllowedTools, Array.isArray(ex.sfhAllowedTools) ? ex.sfhAllowedTools.map(String) : undefined),
-				sfhToolModels: { ...(cur.sfhToolModels ?? {}), ...(ex.sfhToolModels && typeof ex.sfhToolModels === "object" ? ex.sfhToolModels : {}) },
-				sfhToolEfforts: { ...(cur.sfhToolEfforts ?? {}), ...(ex.sfhToolEfforts && typeof ex.sfhToolEfforts === "object" ? ex.sfhToolEfforts : {}) },
-				sfhToolAccess: mergeAccessMap(cur.sfhToolAccess, ex.sfhToolAccess, cur.sfhAccess),
-				// sfhBinary intentionally not overridable by project
-				sfhBinary: cur.sfhBinary,
 				verifyProfiles: cur.verifyProfiles,
 				verifyProfile: requestedProfile ?? cur.verifyProfile,
 				verifyCommands: requestedProfile
@@ -535,10 +459,6 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 			merged.executor = {
 				...cur,
 				...ex,
-				sfhToolModels: { ...(cur.sfhToolModels ?? {}), ...(ex.sfhToolModels && typeof ex.sfhToolModels === "object" ? ex.sfhToolModels : {}) },
-				sfhToolEfforts: { ...(cur.sfhToolEfforts ?? {}), ...(ex.sfhToolEfforts && typeof ex.sfhToolEfforts === "object" ? ex.sfhToolEfforts : {}) },
-				sfhToolAccess: { ...(cur.sfhToolAccess ?? {}), ...(ex.sfhToolAccess && typeof ex.sfhToolAccess === "object" ? ex.sfhToolAccess : {}) },
-				sfhAllowedTools: Array.isArray(ex.sfhAllowedTools) ? ex.sfhAllowedTools.map(String) : cur.sfhAllowedTools,
 				verifyCommands: baseVerify === undefined ? cur.verifyCommands : baseVerify,
 				verifyProfiles: profiles,
 				verifyProfile: requestedProfile,
@@ -600,13 +520,6 @@ function cloneDefault(): MetaLoopConfig {
 		supervisor: { ...defaultConfig.supervisor },
 		executor: {
 			...defaultConfig.executor,
-			sfhToolModels: {},
-			sfhToolEfforts: {},
-			sfhToolAccess: {},
-			sfhAllowedTools:
-				defaultConfig.executor.sfhAllowedTools === undefined
-					? undefined
-					: [...defaultConfig.executor.sfhAllowedTools],
 			verifyCommands:
 				defaultConfig.executor.verifyCommands === undefined
 					? undefined
@@ -635,21 +548,6 @@ function cloneDefault(): MetaLoopConfig {
 	};
 }
 
-/** Snapshot executor access fields as the base-layer ceiling (call after base layers, before project). */
-export function captureSfhAccessCeiling(config: MetaLoopConfig): SfhAccessCeiling {
-	const toolAccess: Record<string, string> = {};
-	for (const [k, v] of Object.entries(config.executor.sfhToolAccess ?? {})) {
-		if (typeof v === "string" && v.trim()) toolAccess[k] = normalizeAccess(v);
-	}
-	const ceiling: SfhAccessCeiling = {
-		sfhAccess: normalizeAccess(config.executor.sfhAccess ?? "read"),
-		sfhToolAccess: toolAccess,
-		sfhIntegrateAccess: normalizeAccess(config.executor.sfhIntegrateAccess ?? "read"),
-	};
-	config.sfhAccessCeiling = ceiling;
-	return ceiling;
-}
-
 /**
  * Build config from explicit base/project layer objects (tests + programmatic use).
  * Mirrors loadConfig layering: base → capture ceiling → project (min-only).
@@ -665,7 +563,6 @@ export function buildConfigFromLayers(
 ): MetaLoopConfig {
 	const merged = cloneDefault();
 	for (const layer of baseLayers) applyLayer(merged, layer ?? null, "base");
-	captureSfhAccessCeiling(merged);
 	for (const layer of projectLayers) applyLayer(merged, layer ?? null, "project");
 	enforceNativeWorkerToolPolicy(merged);
 	return merged;
@@ -715,7 +612,6 @@ function loadConfigUncached(cwd: string): MetaLoopConfig {
 	applyLayer(merged, readJsonIfExists(path.join(repoRoot(), "config", "meta-loop.json"), problems), "base");
 	applyLayer(merged, readJsonIfExists(path.join(userDir, "config.json"), problems), "base");
 	// Freeze user/global access ceilings before project layers (project may only narrow).
-	captureSfhAccessCeiling(merged);
 	// legacy project first, then folder form (folder wins)
 	const legacy = readJsonIfExists(path.join(cwd, CONFIG_DIR_NAME, "meta-loop.json"), problems);
 	const folder = readJsonIfExists(path.join(projectDir, "config.json"), problems);
@@ -821,98 +717,10 @@ export function loadStandards(cwd: string): string {
 	return out.join("\n\n");
 }
 
-export function resolveSfhBranchModel(branch: { tool?: string; model?: string }, config: MetaLoopConfig): string | undefined {
-	if (branch.model?.trim()) return branch.model.trim();
-	const tool = branch.tool ?? "pi";
-	const toolModel = config.executor.sfhToolModels?.[tool];
-	if (toolModel?.trim()) return toolModel.trim();
-	if (config.executor.sfhModel?.trim()) return config.executor.sfhModel.trim();
-	if (tool === "pi" && config.roles.worker.model?.trim()) return config.roles.worker.model.trim();
-	return undefined;
-}
-
-export function resolveSfhIntegrateModel(config: MetaLoopConfig): string | undefined {
-	if (config.executor.sfhIntegrateModel?.trim()) return config.executor.sfhIntegrateModel.trim();
-	if (config.executor.sfhModel?.trim()) return config.executor.sfhModel.trim();
-	if (config.roles.worker.model?.trim()) return config.roles.worker.model.trim();
-	return undefined;
-}
-
-export function resolveSfhBranchEffort(branch: { tool?: string; effort?: string }, config: MetaLoopConfig): string | undefined {
-	if (branch.effort?.trim()) return branch.effort.trim();
-	const tool = branch.tool ?? "pi";
-	const v = config.executor.sfhToolEfforts?.[tool];
-	if (v?.trim()) return v.trim();
-	if (config.executor.sfhEffort?.trim()) return config.executor.sfhEffort.trim();
-	return undefined;
-}
-
-export function resolveSfhIntegrateEffort(config: MetaLoopConfig): string | undefined {
-	if (config.executor.sfhIntegrateEffort?.trim()) return config.executor.sfhIntegrateEffort.trim();
-	if (config.executor.sfhEffort?.trim()) return config.executor.sfhEffort.trim();
-	return undefined;
-}
-
-/**
- * Effective base ceiling for a branch/tool: tool-specific ceiling if present, else sfhAccess ceiling.
- * Without a captured ceiling, returns undefined (no extra clamp — preserves legacy callers).
- */
-function branchAccessCeiling(config: MetaLoopConfig, tool: string): string | undefined {
-	const ceil = config.sfhAccessCeiling;
-	if (!ceil) return undefined;
-	const toolCeil = ceil.sfhToolAccess?.[tool];
-	if (typeof toolCeil === "string" && toolCeil.trim()) return normalizeAccess(toolCeil);
-	return normalizeAccess(ceil.sfhAccess ?? "read");
-}
-
-function integrateAccessCeiling(config: MetaLoopConfig): string | undefined {
-	const ceil = config.sfhAccessCeiling;
-	if (!ceil) return undefined;
-	return normalizeAccess(ceil.sfhIntegrateAccess ?? "read");
-}
-
-/** Branch access: branch > tool map > sfhAccess > read, then min with base ceiling (no escalation). */
-export function resolveSfhBranchAccess(branch: { tool?: string; access?: string }, config: MetaLoopConfig): string {
-	const tool = branch.tool ?? "pi";
-	let resolved: string;
-	if (branch.access?.trim()) {
-		resolved = normalizeAccess(branch.access);
-	} else {
-		const v = config.executor.sfhToolAccess?.[tool];
-		if (v?.trim()) resolved = normalizeAccess(v);
-		else if (config.executor.sfhAccess?.trim()) resolved = normalizeAccess(config.executor.sfhAccess);
-		else resolved = "read";
-	}
-	const ceiling = branchAccessCeiling(config, tool);
-	if (ceiling === undefined) return resolved;
-	return minAccess(resolved, ceiling);
-}
-
-/** Integrate access: sfhIntegrateAccess > sfhAccess > read, then min with base integrate ceiling. */
-export function resolveSfhIntegrateAccess(config: MetaLoopConfig): string {
-	let resolved: string;
-	if (config.executor.sfhIntegrateAccess?.trim()) resolved = normalizeAccess(config.executor.sfhIntegrateAccess);
-	else if (config.executor.sfhAccess?.trim()) resolved = normalizeAccess(config.executor.sfhAccess);
-	else resolved = "read";
-	const ceiling = integrateAccessCeiling(config);
-	if (ceiling === undefined) return resolved;
-	return minAccess(resolved, ceiling);
-}
-
 function normalizeAccess(a: string): string {
 	const v = a.trim().toLowerCase();
 	if (v === "write" || v === "full" || v === "read") return v;
 	return "read";
-}
-
-export function assertSfhToolAllowed(tool: string | undefined, config: MetaLoopConfig): string | null {
-	const list = config.executor.sfhAllowedTools;
-	if (list === undefined) return null;
-	const t = tool ?? "pi";
-	if (!list.includes(t)) {
-		return `sfh tool "${t}" is not allowed (allowed: ${list.length > 0 ? list.join(", ") : "none"})`;
-	}
-	return null;
 }
 
 export { defaultConfig, READ_TOOLS, WORKER_TOOLS };

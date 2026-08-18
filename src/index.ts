@@ -3,7 +3,6 @@
  *
  * - Background orchestrate; STOP file + /ml-stop + bounded force-stop
  * - Cross-process owner lock (PID/heartbeat/lease) + headless STOP poll
- * - Unified panel; sfh ghost runs filtered
  * - Bounded git + filesystem evidence, attributed to whoever caused it
  */
 import { spawnSync } from "node:child_process";
@@ -33,7 +32,6 @@ import {
 	getVerifyDiagnostics,
 	loadConfig,
 	resolveMaxTasksCeiling,
-	unsupportedSfhAccessSettings,
 } from "./config.ts";
 import {
 	createEscalationStats,
@@ -44,29 +42,26 @@ import {
 } from "./escalation.ts";
 import { decideAbortWait, waitForSettlement } from "./orchestration-lifecycle.ts";
 import { runSupervisedTask } from "./runtime.ts";
-import { runSfhPreflight } from "./sfh-exec.ts";
-import {
-	activeRuns,
-	formatElapsed as sfhElapsed,
-	listRuns,
-	pickSfhForPanel,
-	readStatus,
-	type SfhStatus,
-} from "./sfh.ts";
 import {
 	buildFooterLine,
 	buildPanelLines,
+	countersText,
+	dispWidth,
 	nextDetail,
+	padCell,
 	shouldShowPanel,
+	ticketIcon,
 	type PanelDetail,
 } from "./tui-panel.ts";
 import type { TaskBoard, Verdict } from "./types.ts";
 
 const STATUS_KEY = "meta-loop";
 const WIDGET_KEY = "meta-loop-panel";
-/** Legacy keys — always clear so old sessions do not leave ghost widgets */
+/** Legacy keys — always clear so old sessions do not leave ghost widgets.
+ * "sfh" stays listed: a session upgraded from a version that had the sfh executor
+ * would otherwise keep painting its widget and status forever. */
 const LEGACY_WIDGET_KEYS = ["meta-loop", "sfh"];
-const SFH_STATUS_KEY = "sfh";
+const LEGACY_SFH_STATUS_KEY = "sfh";
 const POLL_MS = 800;
 /** abortActive must return even if the run promise hangs (e.g. stuck child). */
 const ABORT_WAIT_MS = 20_000;
@@ -95,24 +90,6 @@ interface ActiveOrchestration {
 function formatLockHolder(holder: OwnerLockHolder | null | undefined): string {
 	if (!holder) return "(no holder info)";
 	return `pid=${holder.pid} host=${holder.hostname} runId=${holder.runId} heartbeat=${holder.heartbeatAt} leaseSec=${holder.leaseSec}`;
-}
-
-function ticketIcon(status: string): string {
-	switch (status) {
-		case "done":
-			return "✓";
-		case "running":
-			return "●";
-		case "partial":
-			return "◐";
-		case "failed":
-		case "cancelled":
-			return "✗";
-		case "blocked":
-			return "■";
-		default:
-			return "○";
-	}
 }
 
 function collectDiscussion(ctx: ExtensionContext): string {
@@ -152,7 +129,6 @@ export default function (pi: ExtensionAPI) {
 	let panelDetail: PanelDetail = "normal";
 	let panelForceUntil = 0;
 	let paintTick = 0;
-	let lastSfh: SfhStatus | null = null;
 	/** Prevent old-session UI/message API calls while async shutdown drains a run. */
 	let shuttingDown = false;
 	let sessionGeneration = 0;
@@ -167,7 +143,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		try {
-			ui.ui.setStatus(SFH_STATUS_KEY, "");
+			ui.ui.setStatus(LEGACY_SFH_STATUS_KEY, "");
 		} catch {
 			/* */
 		}
@@ -191,13 +167,6 @@ export default function (pi: ExtensionAPI) {
 		}
 		const latest = readLatestRun(cwd);
 		return { display: latest, live: null };
-	};
-
-	const refreshSfh = (cwd: string): SfhStatus | null => {
-		// Live or freshly finished only — do not resurrect old audit failures forever
-		const picked = pickSfhForPanel(cwd, { terminalMaxAgeMs: 45_000 });
-		lastSfh = picked;
-		return picked;
 	};
 
 	type AbortActiveResult = {
@@ -255,7 +224,6 @@ export default function (pi: ExtensionAPI) {
 		paintTick++;
 		const theme = ui.ui.theme;
 		const { display, live } = resolveMlDisplay(ui.cwd);
-		const sfh = refreshSfh(ui.cwd);
 		const force = Boolean(opts?.force) || Date.now() < panelForceUntil;
 
 		const panelInput = {
@@ -265,14 +233,14 @@ export default function (pi: ExtensionAPI) {
 			forceShow: force,
 			ml: display,
 			live: live ? { label: live.label, activity: live.activity } : null,
-			sfh,
 			hideFinishedAfterMs: 90_000,
+			width: (process.stdout.columns ?? 80) - 2,
 		};
 
 		const footer = buildFooterLine(panelInput);
 		ui.ui.setStatus(STATUS_KEY, footer);
 		// Keep secondary status empty — everything is in the unified footer/panel
-		ui.ui.setStatus(SFH_STATUS_KEY, "");
+		ui.ui.setStatus(LEGACY_SFH_STATUS_KEY, "");
 
 		if (!shouldShowPanel(panelInput)) {
 			ui.ui.setWidget(WIDGET_KEY, undefined);
@@ -398,10 +366,8 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
-	// ---------- unified poller (meta-loop + sfh → one panel) ----------
+	// ---------- panel poller ----------
 	let pollTimer: ReturnType<typeof setInterval> | undefined;
-	const sfhLastStates = new Map<string, string>();
-	const watchedSfh = new Map<string, string>();
 	/** Set once the poller has painted the transition into idle, so it can then stop. */
 	let idlePainted = false;
 
@@ -447,8 +413,6 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI) return;
 		clearLegacyWidgets(ctx);
 		stopPollers();
-		sfhLastStates.clear();
-		watchedSfh.clear();
 		idlePainted = false;
 		// Briefly show last outcome on session start, then auto-hide if terminal
 		panelForceUntil = Date.now() + 8_000;
@@ -461,37 +425,16 @@ export default function (pi: ExtensionAPI) {
 				// is exactly the overhead this extension promises short tasks won't pay.
 				// The first idle tick still paints once: nothing else repaints on a timer,
 				// so skipping it immediately would strand the last panel on screen.
-				if (!active && watchedSfh.size === 0 && Date.now() >= panelForceUntil) {
-					if (activeRuns(ctx.cwd).length === 0) {
-						if (idlePainted) return;
-						idlePainted = true;
-						paint(ctx);
-						return;
-					}
+				if (!active && Date.now() >= panelForceUntil) {
+					if (idlePainted) return;
+					idlePainted = true;
+					paint(ctx);
+					return;
 				}
 				idlePainted = false;
 				checkCooperativeStop();
 				// Owner-lock heartbeat each poll tick while a run is live.
 				refreshActiveOwnership(active);
-				// sfh state-change notifications
-				const actives = activeRuns(ctx.cwd);
-				for (const r of actives) watchedSfh.set(r.runDir, r.status?.state ?? "running");
-				for (const runDir of [...watchedSfh.keys()]) {
-					const s = readStatus(runDir);
-					if (!s) continue;
-					const prev = sfhLastStates.get(runDir);
-					if (prev && prev !== s.state) {
-						const severity = s.state === "done" ? "info" : s.state === "stuck" ? "warning" : "error";
-						ctx.ui.notify(`sfh:${s.flow} → ${s.state}`, severity);
-						// keep terminal sfh visible a bit
-						panelForceUntil = Math.max(panelForceUntil, Date.now() + 45_000);
-					}
-					if (!prev && s.state === "stuck") {
-						ctx.ui.notify(`sfh:${s.flow} is stuck (human intervention)`, "warning");
-					}
-					sfhLastStates.set(runDir, s.state);
-					if (s.state !== "running" && s.state !== "stuck") watchedSfh.delete(runDir);
-				}
 				paint(ctx);
 			} catch (err) {
 				console.error("[pi-meta-loop] poller error", err);
@@ -581,12 +524,6 @@ export default function (pi: ExtensionAPI) {
 		if (!verifyStatus.donePossible) {
 			startupNotes.push(
 				`No trusted verify configured (${verifyStatus.problem ?? "unset"}). Native tickets can reach 'partial' at best; run /skill:meta-loop-setup or /ml-doctor to set a verify profile.`,
-			);
-		}
-		const unsupportedAccess = unsupportedSfhAccessSettings(config);
-		if (unsupportedAccess.length > 0) {
-			startupNotes.push(
-				`sfh write/full access is configured (${unsupportedAccess.join(", ")}) but unsupported without an OS sandbox; group tickets using it will be refused.`,
 			);
 		}
 		if (startupNotes.length > 0 && ctx.hasUI) {
@@ -902,63 +839,6 @@ export default function (pi: ExtensionAPI) {
 		};
 	};
 
-	pi.registerCommand("sfh", {
-		description: "Show sfh run status (/sfh stop stops newest run)",
-		handler: async (args, ctx) => {
-			const cfg = loadConfig(ctx.cwd);
-			if (!cfg.enabled) {
-				ctx.ui.notify("pi-meta-loop is disabled", "info");
-				return;
-			}
-			if (args.trim() === "stop") {
-				try {
-					const bin = cfg.executor.sfhBinary || "sfh";
-					const r = spawnSync(bin, ["stop"], { cwd: ctx.cwd, timeout: 30_000 });
-					const out = `${r.stdout?.toString() ?? ""}${r.stderr?.toString() ?? ""}`.trim();
-					ctx.ui.notify(out ? out.slice(0, 300) : `sfh stop: exit ${r.status}`, r.status === 0 ? "info" : "error");
-				} catch {
-					ctx.ui.notify("sfh stop failed (is sfh installed?)", "error");
-				}
-				return;
-			}
-			const runs = listRuns(ctx.cwd, 10);
-			if (runs.length === 0) {
-				ctx.ui.notify("No .sfh/runs records in this project", "info");
-				return;
-			}
-			const items = runs.map((r) => {
-				const s = r.status;
-				const core = s
-					? `${s.state}  ${s.flow}  step:${s.current_step}  $${(s.cost_usd ?? 0).toFixed(2)}  ${sfhElapsed(s.elapsed_sec)}`
-					: "(no status.json)";
-				return `${r.id}  ${core}`;
-			});
-			const choice = await ctx.ui.select("Select sfh run:", items);
-			if (!choice) return;
-			const picked = runs[items.indexOf(choice)];
-			const s = picked?.status;
-			if (!s) {
-				ctx.ui.notify(`${picked?.id}: cannot read status.json`, "warning");
-				return;
-			}
-			ctx.ui.notify(
-				[
-					`run: ${picked.id}`,
-					`flow: ${s.flow}   state: ${s.state}`,
-					`step: ${s.current_step}   steps_done: ${s.steps_done}`,
-					`cost: $${(s.cost_usd ?? 0).toFixed(2)}   elapsed: ${sfhElapsed(s.elapsed_sec)}`,
-					s.error ? `error: ${s.error}` : "",
-					`dir: ${s.run_dir ?? picked.runDir}`,
-					"",
-					"Stop newest: /sfh stop",
-				]
-					.filter(Boolean)
-					.join("\n"),
-				s.state === "stuck" ? "warning" : "info",
-			);
-		},
-	});
-
 	// The kill switch should also remove the tool: leaving it registered lets the
 	// model spend a turn calling something that can only answer "disabled".
 	// Commands stay registered either way — /ml-doctor is how a user finds out
@@ -969,7 +849,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Supervised Task",
 		description: [
 			"Long-running / multi-deliverable tasks only.",
-			"Orchestrator decomposes into tickets; Supervisor audits (fail-closed); Workers or sfh groups execute.",
+			"Orchestrator decomposes into tickets; Supervisor audits (fail-closed); native Workers execute.",
 			"In TUI, runs in the BACKGROUND by default so the user can keep chatting. Status via widget + /tasks.",
 			"Do NOT use for short Q&A, git status, or single-file fixes.",
 		].join("\n"),
@@ -1033,15 +913,17 @@ export default function (pi: ExtensionAPI) {
 				`status: ${runMeta && "status" in runMeta ? runMeta.status : "?"}  phase: ${board.phase}  reviews: ${board.reviewCount}`,
 				active ? `live: ${active.label}` : runMeta && "label" in runMeta ? `last: ${runMeta.label}` : "",
 				active ? `elapsed: ${formatElapsed(active.startedAt)}` : "",
-				`counts: ✓${c.done} ●${c.running} ○${c.pending} ◐${c.partial} ✗${c.failed} ■${c.blocked} / ${c.total}`,
+				`counts: ${countersText(c) || "—"} / ${c.total}`,
 				board.verdict ? `verdict: ${board.verdict.verdict}` : "",
 				board.planSummary ? `plan: ${board.planSummary.slice(0, 160)}` : "",
 				`goal: ${board.goal.slice(0, 120)}`,
 			].filter(Boolean);
 
+			// Same glyph vocabulary and id column as the panel, so the two read as one UI.
+			const idCol = Math.min(24, board.tickets.reduce((m, t) => Math.max(m, dispWidth(t.id)), 0));
 			const ticketLines = board.tickets.map((t) => {
 				const err = t.error ? ` — ${t.error.slice(0, 60)}` : "";
-				return `${ticketIcon(t.status)} ${t.id} [${t.status}] ${t.goal.slice(0, 50)}${err}`;
+				return `${ticketIcon(t.status)} ${padCell(t.id, idCol)}  ${t.goal.slice(0, 50)}${err}`;
 			});
 
 			// Overview first
@@ -1067,7 +949,7 @@ export default function (pi: ExtensionAPI) {
 				let t = named;
 				if (!t) {
 					const items = board.tickets.map(
-						(x) => `${ticketIcon(x.status)} ${x.id} [${x.status}] ${x.goal.slice(0, 40)}`,
+						(x) => `${ticketIcon(x.status)} ${padCell(x.id, idCol)}  ${x.goal.slice(0, 40)}`,
 					);
 					const choice = await ctx.ui.select("Ticket detail:", items);
 					t = choice ? board.tickets[items.indexOf(choice)] : undefined;
@@ -1137,21 +1019,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("ml-doctor", {
-		description: "Show effective verify gate and SFH machine-contract diagnostics",
+		description: "Show the effective verify gate and capability envelope",
 			handler: async (_args, ctx) => {
 			const cfg = loadConfig(ctx.cwd);
 			const problems = getConfigProblems(ctx.cwd);
 			const verify = getVerifyDiagnostics(ctx.cwd, cfg);
-			const sfh = runSfhPreflight(cfg.executor.sfhBinary || "sfh", undefined, ctx.cwd);
-			const unsupportedAccess = unsupportedSfhAccessSettings(cfg);
 			const commands = verify.commands.length
 				? verify.commands.map((argv) => `  - ${JSON.stringify(argv)}`)
 				: ["  - (none; native done will remain partial)"];
-			// sfh is only needed for group tickets, so its absence is information, not
-			// a problem. Distinguish "not on PATH" from "installed but misbehaving":
-			// both used to surface as SFH_PREFLIGHT_INVALID and print "not installed".
-			const sfhMissing = /ENOENT|not found|No such file/i.test(sfh.errorMessage ?? "");
-			const sfhInstalled = !(sfh.errorCode === "SFH_PREFLIGHT_INVALID" && sfhMissing);
 			const healthy = cfg.enabled && verify.donePossible && problems.length === 0;
 			ctx.ui.notify(
 				[
@@ -1171,18 +1046,7 @@ export default function (pi: ExtensionAPI) {
 					`project model override: ${cfg.allowProjectModelOverride ? "ALLOWED" : "blocked"}`,
 					`mid-run audit budget: ${cfg.limits.maxSupervisions}`,
 					`evidence: parentDepth=${cfg.evidence.parentMaxDepth} maxEntries=${cfg.evidence.maxEntries} timeout=${cfg.evidence.timeoutMs}ms ignored=${cfg.evidence.ignoreDirNames.length} dirs`,
-					`sfh integrate tool: ${cfg.executor.sfhIntegrateTool?.trim() || "(inferred from model id)"}`,
-					unsupportedAccess.length
-						? `sfh access WARNING: ${unsupportedAccess.join(", ")} — write/full is refused without an OS sandbox`
-						: "",
-					"",
-					sfhInstalled
-						? `sfh machine schema: ${sfh.schemaVersion === 1 ? "v1 compatible" : "UNSUPPORTED"}`
-						: "sfh: not installed (optional; only group tickets need it)",
-					sfhInstalled ? `sfh version: ${sfh.sfhVersion || "unknown"}` : "",
-					sfhInstalled
-						? `sfh preflight: ${sfh.ok ? "ready" : [sfh.errorCode, sfh.errorMessage].filter(Boolean).join(": ") || "failed"}`
-						: "",
+					`executor: native pi worker only`,
 				]
 					.filter(Boolean)
 					.join("\n"),

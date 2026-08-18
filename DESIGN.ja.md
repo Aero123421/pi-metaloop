@@ -17,10 +17,9 @@ fail-closed・evidence・verify・capability 境界の側である。
 | Orchestrator | read, ls, find, grep（**bash なし**） |
 | Supervisor | read, ls, find, grep（**bash なし**） |
 | Worker | read, write, edit, ls, find, grep（**bash なし**・intercept 可能な built-in のみ） |
-| sfh group | **read-only review**（OS sandbox なしでは write/full を実行・done にしない） |
 
-- Project config は user/default の能力を**狭めるだけ**。sfhBinary 変更・access 引き上げ・allowlist
-  拡大・verify argv 追加・**役割モデルの選択**は不可（`allowProjectModelOverride` で明示許可した場合を除く）。
+- Project config は user/default の能力を**狭めるだけ**。allowlist 拡大・verify argv 追加・
+  **役割モデルの選択**は不可（`allowProjectModelOverride` で明示許可した場合を除く）。
 - Native Worker の effective tools は `WORKER_TOOLS` 厳密 allowlist 交差。`--no-extensions` + scope-guard
   のみロード。tool_call guard も bash を無条件拒否。
 - `limits.scopeCeiling` が設定されていれば、チケットの `allowed_scope` はその内側に収まることを
@@ -52,7 +51,7 @@ WorkerClaim（自己申告）と ExecutionEvidence（exit + git + filesystem + c
 
 ## 監査
 
-- Supervisor には **フル ticket JSON**（acceptance / scope / branches / claim / evidence）
+- Supervisor には **フル ticket JSON**（acceptance / scope / claim / evidence）
 - 初回 audit は **fail-closed**（不正 JSON / 非0 exit → 実行しない）
 - blocked / out-of-scope は即時 re-audit。ただし同一原因の blocked はまとめて1回
 - 実行中の監査は `limits.maxSupervisions` で上限。初回と最終の監査は常に実行される
@@ -81,7 +80,7 @@ folder が legacy に勝つ。standards は優先度高い層を cap 内で優�
 
 - **TUI では orchestrate はデフォルト background** — tool は即 return、チャット継続可
 - 完了時 `meta-loop-result` を `sendMessage({ followUp, triggerTurn })` で注入
-- 起動時に verify 未設定・sfh write/full を警告（続行は可能）
+- 起動時に verify 未設定を警告（続行は可能）
 - 停止: `/ml-stop`（AbortController）
 - 状態: footer + **widget（belowEditor）** + `/tasks` `/ml-runs`。`/tasks <ticket-id>` で詳細
 - board 永続化: `.pi/meta-loop/runs/<runId>/board.json` + `latest.json`。新しい20件まで保持
@@ -93,15 +92,15 @@ folder が legacy に勝つ。standards は優先度高い層を cap 内で優�
 ## 既知の限界
 
 - bash 個別 denylist は収束しないため、scoped native Worker では bash 自体を付与しない（built-in + scope + evidence）
-- sfh write/full は OS sandbox なしでは scope を保証できないため拒否（read-only review のみ）
-- sfh グループの完了判定は exit 0 + 非空 stdout。`integration.acceptance` は検証されない（native の
-  決定論的 verify とは非対称。調査系タスク向けの割り切り）
+- executor は native pi worker のみ。scope の執行はツールコール時の介入で行われ、これは pi 固有の
+  機構である。介入できない executor は事後掃引でしか確認できず、それは検出のバックストップであって
+  執行ではない。マルチ CLI worker は issue #4 で追跡し、この問いに答えるまで出荷しない
 - verify profile の承認は、対象リポジトリ自身のコードを実行する許可を意味する（SECURITY.md 参照）
 - `limits.scopeCeiling` 未設定なら、書き込み範囲はモデル出力が決める
 - background 中に Primary が同じ tree を編集すると Worker と衝突しうる。evidence の範囲を絞ったことで
   誤検出は大きく減ったが、`allowed_scope` 内の同じファイルを両者が触れば競合は残る
 - チケット実行中の壁時計 Supervisor は未実装（チケット境界）
 - nesting guard は協調的経路向け
-- role/SFH subprocess は provider credentials のため host environment を継承する（値は doctor/log に出さない）
+- role subprocess は provider credentials のため host environment を継承する（値は doctor/log に出さない）
 - クラッシュ後の run は session_start で `stopped` に落とす（自動再開なし）
 - project config は access/tools/model を**広げられない**（user 層で ceiling を上げる）

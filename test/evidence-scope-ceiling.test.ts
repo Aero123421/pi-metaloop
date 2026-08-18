@@ -65,15 +65,6 @@ describe("harness scope ceiling", () => {
 		assert.equal(validateTicket(ticket(["src/a"]), ["src/**"]), null);
 	});
 
-	it("applies to sfh group tickets that declare a scope", () => {
-		const group: Ticket = {
-			...ticket(["infra/**"]),
-			execution: "sfh",
-			branches: [{ id: "b", prompt: "p" }],
-			integration: { acceptance: ["covered"] },
-		};
-		assert.match(validateTicket(group, ["src/**"]) ?? "", /outside limits\.scopeCeiling/);
-	});
 });
 
 describe("bounded evidence sweep", () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildConfigFromLayers, unsupportedSfhAccessSettings } from "../src/config.ts";
+import { buildConfigFromLayers } from "../src/config.ts";
 import { evaluateFilesystemEvidence } from "../src/runtime.ts";
 import type { FilesystemSnapshot } from "../src/fs-snapshot.ts";
 import type { Ticket } from "../src/types.ts";
@@ -41,30 +41,6 @@ describe("project cannot choose the supervising model", () => {
 		);
 		assert.equal(cfg.roles.orchestrator.model, "trusted/strong");
 		assert.deepEqual(cfg.roles.orchestrator.tools, ["read"]);
-	});
-});
-
-describe("unsupported sfh access is reported up front", () => {
-	it("lists every mutating access setting", () => {
-		const cfg = buildConfigFromLayers([
-			{
-				executor: {
-					sfhAccess: "write",
-					sfhIntegrateAccess: "full",
-					sfhToolAccess: { pi: "read", codex: "write" },
-				},
-			},
-		]);
-		assert.deepEqual(unsupportedSfhAccessSettings(cfg).sort(), [
-			"executor.sfhAccess=write",
-			"executor.sfhIntegrateAccess=full",
-			"executor.sfhToolAccess.codex=write",
-		]);
-	});
-
-	it("is silent for a read-only configuration", () => {
-		const cfg = buildConfigFromLayers([{ executor: { sfhAccess: "read" } }]);
-		assert.deepEqual(unsupportedSfhAccessSettings(cfg), []);
 	});
 });
 

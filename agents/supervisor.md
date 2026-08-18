@@ -24,9 +24,8 @@ Answer in the language the user wrote in.
    that crept in.
 2. **Meso** — The Orchestrator's behavioral pattern: tunnel vision (e.g. a research task
    losing coverage), over-decomposition, repeated re-decomposition, wobbling priorities.
-   Board structure, dependencies, conflicts. For group tickets (`execution: sfh`): are branch
-   responsibilities distinct, is genuinely serial work being run in parallel, is
-   `integration.acceptance` observable?
+   Board structure, dependencies, conflicts: does any pair of tickets claim the same file,
+   and is genuinely independent work needlessly serialized behind a dependency?
 3. **Micro** — Individual ticket failures, scope escapes, report quality, missing prerequisites.
 
 ## How to judge

@@ -8,7 +8,7 @@
 | User | `~/.pi/agent/meta-loop/config.json` |
 | Project | `<cwd>/.pi/meta-loop/config.json` |
 
-Later layers win. `sfhToolModels` / `sfhToolEfforts` / `sfhToolAccess` are deep-merged.
+Later layers win. Map-valued settings are deep-merged.
 
 ## roles
 
@@ -27,29 +27,13 @@ Empty `model` = inherit pi default. Used for **pi subprocesses** (Orchestrator /
 
 **Strict built-in allowlist** for scoped native workers (`read,write,edit,ls,find,grep`). bash/custom tool names are stripped; production tool_call guard blocks bash. Workers launch with `--no-extensions` and only the harness scope-guard extension. Build/test uses the selected verify profile or legacy `executor.verifyCommands` (controller-side).
 
-## executor（sfh）
+## executor
 
 ```json
 {
   "executor": {
-    "sfhEnabled": true,
-    "sfhBinary": "sfh",
     "timeoutSec": 1800,
     "maxParallel": 4,
-
-    "sfhAllowedTools": ["pi", "opencode"],
-
-    "sfhModel": "",
-    "sfhEffort": "",
-    "sfhAccess": "read",
-
-    "sfhToolModels":  { "pi": "provider/id", "opencode": "" },
-    "sfhToolEfforts": { "pi": "medium", "codex": "high" },
-    "sfhToolAccess":  { "pi": "read", "opencode": "read" },
-
-    "sfhIntegrateModel": "",
-    "sfhIntegrateEffort": "",
-    "sfhIntegrateAccess": "read",
 
     "verifyProfiles": {
       "node": [["npm", "test"], ["npm", "run", "typecheck"]],
@@ -57,8 +41,7 @@ Empty `model` = inherit pi default. Used for **pi subprocesses** (Orchestrator /
     },
     "verifyProfile": "node",
     "verifyTimeoutSec": 600,
-    "verifyMode": "per-ticket",
-    "sfhIntegrateTool": ""
+    "verifyMode": "per-ticket"
   }
 }
 ```
@@ -80,29 +63,6 @@ Empty `model` = inherit pi default. Used for **pi subprocesses** (Orchestrator /
   when intermediate tickets cannot leave the tree green on their own.
 - A baseline verify always runs once before the first ticket. A ticket failing a command that was
   already failing then is recorded `partial` with `verify.preExisting`, never `failed`.
-
-### Branch field resolution
-
-For each sfh parallel branch:
-
-| Field | Order |
-|-------|--------|
-| model | `branches[].model` → `sfhToolModels[tool]` → `sfhModel` → (if tool=pi) `roles.worker.model` |
-| effort | `branches[].effort` → `sfhToolEfforts[tool]` → `sfhEffort` |
-| access | `branches[].access` → `sfhToolAccess[tool]` → `sfhAccess` → `"read"` |
-
-Integrate step: `sfhIntegrate*` → `sfhModel`/`sfhEffort` → worker.model for model; access default `read`.
-
-### sfhAllowedTools
-
-- Omitted: unrestricted
-- Empty list `[]`: explicit deny-all
-- Non-empty list: Orchestrator/group tickets may only use these tool names; others → ticket **blocked**
-
-### effort / access notes
-
-- **effort** strings are tool-defined (codex/claude often `low|medium|high`; pi may ignore unknown values)
-- **access**: `read` (no writes), `write`, `full` — **without an OS sandbox only `read` is supported**. `write`/`full` is refused at plan/execute, never marked done via post-hoc evidence alone, and reported at orchestrate startup and by `/ml-doctor`. Do not configure it.
 
 ## supervisor
 
