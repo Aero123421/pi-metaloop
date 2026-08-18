@@ -1,6 +1,6 @@
 # pi-meta-loop
 
-**Status: リリース候補。正確な版は `package.json` を参照。** [pi](https://github.com/earendil-works/pi) 向け適応型監督オーケストレーション。
+**Status: リリース済み。正確な版は `package.json` を参照。** [pi](https://github.com/earendil-works/pi) 向け適応型監督オーケストレーション。
 
 短いタスクは軽いまま。長いタスクは Orchestrator + Supervisor + Worker。**初回監査は fail-closed**、完了は **evidence ベース**、権限は **能力境界**（プロンプトだけに頼らない）。
 
