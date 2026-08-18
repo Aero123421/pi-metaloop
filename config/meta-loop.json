@@ -36,6 +36,7 @@
 		"promptLengthThreshold": 400
 	},
 	"evidence": {
+		"filesystemSweep": false,
 		"parentMaxDepth": 0,
 		"maxEntries": 250000,
 		"timeoutMs": 30000

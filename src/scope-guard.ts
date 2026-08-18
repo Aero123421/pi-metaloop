@@ -1,13 +1,20 @@
 /**
  * Worker scope guard — loaded into implementation-worker subprocesses via `pi -e`.
  *
- * write/edit are path checked. Bash is unconditionally denied at the tool_call
- * gate for scoped native workers (defense in depth: shell parsing does not
- * converge on a safe allowlist). `inspectBashCommand` remains as a secondary
- * inspector for tests and any residual call sites. The runtime also takes
- * bounded pre/post filesystem snapshots for built-in write/edit paths.
+ * Two rules, both enforced at the tool-call gate:
+ *
+ * - `bash` is denied unconditionally. Per-command shell denylists do not converge —
+ *   eight rounds of hardening each closed one more write side-channel (awk, find,
+ *   sort, yq, diff, rg, git, less…) and the next one always existed. The 450-line
+ *   inspector that grew out of those rounds ended up behind this unconditional deny,
+ *   where it could never run; it was removed rather than maintained as decoration.
+ * - `write` and `edit` are path checked against the ticket's `allowed_scope`, with
+ *   symlinks resolved explicitly so a link inside the scope cannot redirect a write
+ *   outside it.
+ *
+ * The harness also takes bounded pre/post filesystem snapshots. That is a detection
+ * backstop, not the enforcement: enforcement is here, before the write happens.
  */
-import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { checkPath } from "./evidence.ts";
 
@@ -26,504 +33,22 @@ function parseList(raw: string | undefined): string[] {
 
 const MUTATING = new Set(["write", "edit"]);
 
-const BLOCKED_GIT_SUBCOMMANDS = new Set([
-	"add", "am", "apply", "branch", "checkout", "cherry-pick", "clean", "commit",
-	"merge", "mv", "push", "rebase", "reset", "restore", "revert", "rm", "stash",
-	"switch", "tag", "update-index", "worktree",
-]);
-
-/** Unknown git aliases/subcommands fail closed. */
-const READ_ONLY_GIT_SUBCOMMANDS = new Set([
-	"blame", "cat-file", "check-attr", "check-ignore", "describe", "diff", "for-each-ref",
-	"grep", "log", "ls-files", "ls-tree", "merge-base", "name-rev", "rev-list", "rev-parse",
-	"show", "show-ref", "status",
-]);
-
-const GIT_OPTS_WITH_ARG = new Set([
-	"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
-]);
-
-interface ShellToken {
-	kind: "word" | "op";
-	value: string;
-}
-
-/** Small quote-aware lexer. It intentionally rejects malformed quoting. */
-function lexShell(command: string): { ok: true; tokens: ShellToken[] } | { ok: false; error: string } {
-	const tokens: ShellToken[] = [];
-	let word = "";
-	let quote: "'" | '"' | null = null;
-	const flush = () => {
-		if (word !== "") tokens.push({ kind: "word", value: word });
-		word = "";
-	};
-	for (let i = 0; i < command.length; i++) {
-		const c = command[i];
-		if (quote) {
-			if (c === quote) {
-				quote = null;
-			} else if (c === "\\" && quote === '"' && i + 1 < command.length) {
-				word += command[++i];
-			} else {
-				word += c;
-			}
-			continue;
-		}
-		if (c === "'" || c === '"') {
-			quote = c;
-			continue;
-		}
-		if (c === "\\" && i + 1 < command.length) {
-			word += command[++i];
-			continue;
-		}
-		if (/\s/u.test(c)) {
-			flush();
-			if (c === "\n") tokens.push({ kind: "op", value: ";" });
-			continue;
-		}
-
-		const rest = command.slice(i);
-		// Keep fd duplication (2>&1) as one safe redirection token while exposing a
-		// standalone `&` as the shell background operator.
-		const op = /^(?:\d*(?:>>|>|>\||<<|<)&(?:\d+|-)|&>>|&>|&&|\|\||\d*(?:>>|>|>\||<<|<)|[&;|()])/u.exec(rest)?.[0];
-		if (op) {
-			flush();
-			tokens.push({ kind: "op", value: op });
-			i += op.length - 1;
-			continue;
-		}
-		word += c;
-	}
-	if (quote) return { ok: false, error: "unterminated shell quote" };
-	flush();
-	return { ok: true, tokens };
-}
-
-function executableName(token: string): string {
-	let base = path.basename(token.replace(/\\/g, "/")).toLowerCase();
-	if (base.endsWith(".exe")) base = base.slice(0, -4);
-	return base;
-}
-
-function shellSegments(tokens: ShellToken[]): ShellToken[][] {
-	const out: ShellToken[][] = [];
-	let current: ShellToken[] = [];
-	for (const token of tokens) {
-		if (token.kind === "op" && (token.value === ";" || token.value === "|" || token.value === "&&" || token.value === "||")) {
-			if (current.length) out.push(current);
-			current = [];
-		} else {
-			current.push(token);
-		}
-	}
-	if (current.length) out.push(current);
-	return out;
-}
-
-function commandWords(segment: ShellToken[]): string[] {
-	const words: string[] = [];
-	for (let i = 0; i < segment.length; i++) {
-		const token = segment[i];
-		if (token.kind === "op" && /^\d*(?:>|>>|<|<<|>\|)&(?:\d+|-)$/u.test(token.value)) {
-			continue; // fd duplication/closure has no following target token
-		}
-		if (token.kind === "op" && /^(?:\d*>|\d*>>|\d*>\||&>|&>>)$/u.test(token.value)) {
-			i += 1; // redirection target
-			continue;
-		}
-		if (token.kind === "word") words.push(token.value);
-	}
-	return words;
-}
-
-function stripCommandPrefixes(input: string[]): string[] {
-	let words = [...input];
-	while (words.length) {
-		while (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[0] ?? "")) words.shift();
-		const exe = executableName(words[0] ?? "");
-		if (exe === "env") {
-			words.shift();
-			while (words.length) {
-				if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[0])) words.shift();
-				else if (words[0] === "-u" || words[0] === "--unset") words.splice(0, 2);
-				else if (words[0].startsWith("-")) words.shift();
-				else break;
-			}
-			continue;
-		}
-		if (exe === "sudo") {
-			words.shift();
-			while (words[0]?.startsWith("-")) {
-				const option = words.shift();
-				if (option === "-u" || option === "-g" || option === "-h" || option === "-p") words.shift();
-			}
-			continue;
-		}
-		if (exe === "command" || exe === "exec") {
-			words.shift();
-			while (words[0]?.startsWith("-")) words.shift();
-			continue;
-		}
-		break;
-	}
-	return words;
-}
-
-function hasEnvSplitPrefix(input: string[]): boolean {
-	let words = [...input];
-	while (words.length) {
-		while (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[0] ?? "")) words.shift();
-		const exe = executableName(words[0] ?? "");
-		if (exe === "sudo") {
-			words.shift();
-			while (words[0]?.startsWith("-")) {
-				const option = words.shift();
-				if (option === "-u" || option === "-g" || option === "-h" || option === "-p") words.shift();
-			}
-			continue;
-		}
-		if (exe === "command" || exe === "exec") {
-			words.shift();
-			while (words[0]?.startsWith("-")) words.shift();
-			continue;
-		}
-		if (exe !== "env") return false;
-		words.shift();
-		for (let i = 0; i < words.length; i++) {
-			const word = words[i];
-			if (/^(?:-S|--split-string(?:=|$))/u.test(word)) return true;
-			if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) continue;
-			if (word === "-u" || word === "--unset") { i += 1; continue; }
-			if (word.startsWith("-")) continue;
-			words = words.slice(i);
-			break;
-		}
-	}
-	return false;
-}
-
-function gitWordsAreBlocked(input: string[]): boolean {
-	const words = stripCommandPrefixes(input);
-	if (executableName(words[0] ?? "") !== "git") return false;
-
-	// Env assignments anywhere on the argv (including `env VAR=… git …`) can inject
-	// pagers, external diff drivers, editors, and other child launchers.
-	for (const token of input) {
-		if (!/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)) continue;
-		const name = token.slice(0, token.indexOf("="));
-		if (/^GIT_/iu.test(name) || /^(?:PAGER|EDITOR|VISUAL|LESS|MORE)$/iu.test(name)) return true;
-	}
-
-	// Flags that write files or reconfigure helpers on otherwise "read-only" subcommands.
-	for (let i = 1; i < words.length; i++) {
-		const token = words[i];
-		const lower = token.toLowerCase();
-		if (lower === "--output" || lower.startsWith("--output=")) return true;
-		if (token === "-c" || token === "--config-env" || token.startsWith("--config-env=")) return true;
-		// Combined -cKEY=VAL (but not -C<path>, which only changes cwd).
-		if (/^-c/u.test(token) && !/^-C/u.test(token)) return true;
-	}
-
-	let i = 1;
-	while (i < words.length) {
-		const token = words[i];
-		if (token === "--") { i += 1; break; }
-		if (GIT_OPTS_WITH_ARG.has(token)) { i += 2; continue; }
-		if (/^-[Cc].+/u.test(token) || token.startsWith("--git-dir=") || token.startsWith("--work-tree=")) {
-			i += 1;
-			continue;
-		}
-		if (token.startsWith("-")) { i += 1; continue; }
-		break;
-	}
-	if (i >= words.length) return true; // ambiguous `git` may invoke configured help/alias behaviour
-	const subcommand = words[i].toLowerCase();
-	return BLOCKED_GIT_SUBCOMMANDS.has(subcommand) || !READ_ONLY_GIT_SUBCOMMANDS.has(subcommand);
-}
-
-function nestedCommand(wordsInput: string[]): string | null {
-	const words = stripCommandPrefixes(wordsInput);
-	const exe = executableName(words[0] ?? "");
-	if (["sh", "bash", "dash", "zsh", "ksh"].includes(exe)) {
-		const at = words.findIndex((w, i) => i > 0 && (w === "-c" || w === "-lc" || w === "-ic"));
-		return at >= 0 ? words[at + 1] ?? "" : null;
-	}
-	if (exe === "cmd") {
-		const at = words.findIndex((w, i) => i > 0 && (w.toLowerCase() === "/c" || w.toLowerCase() === "/k"));
-		return at >= 0 ? words.slice(at + 1).join(" ") : null;
-	}
-	if (exe === "powershell" || exe === "pwsh") {
-		const at = words.findIndex((w, i) => i > 0 && ["-c", "-command"].includes(w.toLowerCase()));
-		return at >= 0 ? words.slice(at + 1).join(" ") : null;
-	}
-	return null;
-}
-
-function hasBlockedGit(command: string, depth = 0): boolean {
-	if (depth > 8) return true;
-	// Command substitution can synthesize an executable or hide a second command;
-	// the small guard parser cannot prove it read-only, so fail closed.
-	if (command.includes("$(") || command.includes("`")) return true;
-	const lexed = lexShell(command);
-	if (!lexed.ok) return true;
-	for (const segment of shellSegments(lexed.tokens)) {
-		const words = commandWords(segment);
-		if (gitWordsAreBlocked(words)) return true;
-		const nested = nestedCommand(words);
-		if (nested !== null && hasBlockedGit(nested, depth + 1)) return true;
-	}
-	return false;
-}
-
-/** Detect git state mutation, including git.exe/env/shell/cmd indirection. */
-export function isBlockedGitBashCommand(command: string): boolean {
-	return command.trim() !== "" && hasBlockedGit(command);
-}
-
-export interface BashInspection {
-	ok: boolean;
-	reason?: string;
-}
-
-/** Production reason when the bash tool is invoked on a scoped native worker. */
-export const NATIVE_WORKER_BASH_DISABLED_REASON =
-	"bash is disabled for scoped native workers; use interceptable built-ins only (read/write/edit/ls/find/grep). Build/test verification is controller-side trusted verify";
-
-/** Unconditional production denial for any bash tool_call (plan/execute/config cannot override). */
 export function denyWorkerBashToolCall(): { block: true; reason: string } {
-	return { block: true, reason: `pi-meta-loop scope guard: ${NATIVE_WORKER_BASH_DISABLED_REASON}` };
-}
-
-const DETACH_COMMANDS = new Set([
-	// POSIX shell/job/session detachment and service/scheduler submission.
-	"nohup", "setsid", "disown", "bg", "coproc", "daemon", "daemonize", "systemd-run", "at", "batch",
-	// Windows process/job launch equivalents (including PowerShell cmdlets).
-	"start", "start-process", "start-job", "start-threadjob", "schtasks", "wmic", "wscript", "cscript", "mshta",
-]);
-
-/**
- * Fail-closed read-oriented bash allowlist. Arbitrary writers (touch/cp/mv/rm/…)
- * cannot be made scope-safe by parsing alone, and filesystem snapshots only cover a
- * bounded neighbourhood — so unknown executables are denied.
- *
- * Admission rule: a command stays here only if every write side-channel is either
- * (a) shell redirection (path-checked below) or (b) explicit operand checking
- * (currently `tee` only). Commands capable of arbitrary output files, in-place
- * edits, code execution, or child launching — even via optional flags the small
- * parser might miss — are denied at the allowlist gate. Workers should use
- * built-in read/grep/find/etc. for verification instead.
- *
- * Deliberately excluded (code exec / delete / detach / unscoped write):
- * awk (system()), find (-exec/-delete), sed, sort (-o/--output), yq (-i/--inplace),
- * diff (--output), rg/ag/ack (--pre and plugins), less/more (! shell-out),
- * git (diff --output, -c/GIT_* pager and external-diff child launch — also
- * blocked in gitWordsAreBlocked), npm/pnpm/yarn/npx and other package/build/test
- * runners, shells and general-purpose interpreters (sh/bash/node/…), base64
- * (-o/--output file writes), process substitution, and env-prefix loader/PATH
- * assignments (LD_PRELOAD, PATH, …). Nested `sh -c` is denied at the allowlist
- * gate; no OS sandbox is available here. `tee` remains only because every target
- * is path-checked the same way as shell redirections. `jq` stays (stdout filters
- * only). `grep`/`egrep`/`fgrep` stay (no preprocessor/exec flag). Bare `env` may
- * print the environment; assignments via `env` or shell prefixes are rejected.
- * `python` is further restricted to informational flags.
- *
- * Production always denies the bash tool entirely; this allowlist is defense in depth.
- */
-const BASH_READONLY_ALLOWLIST = new Set([
-	"ls", "dir", "cat", "type", "head", "tail", "wc", "file", "stat",
-	"grep", "egrep", "fgrep",
-	"echo", "printf", "true", "false", "test", "pwd", "whoami", "uname", "hostname", "date",
-	"which", "where", "whereis", "basename", "dirname", "realpath", "readlink", "printenv", "env",
-	"cmp", "uniq", "cut", "tr", "od", "hexdump",
-	"md5sum", "sha1sum", "sha256sum", "cksum", "sum",
-	"jq", "tee",
-]);
-
-function isBashAllowlistedExecutable(exe: string): boolean {
-	if (BASH_READONLY_ALLOWLIST.has(exe)) return true;
-	// versioned python binaries are further restricted to informational flags only
-	if (exe === "py" || /^python(?:\d+(?:\.\d+)*)?$/u.test(exe)) return true;
-	return false;
-}
-
-const SCRIPT_EXTENSIONS = /\.(?:sh|bash|dash|zsh|ksh|fish|cmd|bat|ps1|py|pyw|js|mjs|cjs|ts|mts|cts)$/iu;
-
-function isDirectScriptExecutable(token: string): boolean {
-	return SCRIPT_EXTENSIONS.test(token);
-}
-
-function safeSink(target: string): boolean {
-	const t = target.toLowerCase();
-	return t === "/dev/null" || t === "nul" || t === "nul:" || /^&\d+$/u.test(t);
-}
-
-function inspectWriteTarget(target: string, cwd: string, allowed: string[], forbidden: string[]): string | null {
-	if (!target) return "missing redirection/write target";
-	if (safeSink(target)) return null;
-	if (/[`$%]/u.test(target)) return `dynamic shell write target cannot be scope-checked: ${target}`;
-	const result = checkPath(target, cwd, allowed, forbidden);
-	return result.ok ? null : result.reason;
-}
-
-/**
- * Conservative implementation-worker bash inspection. Obvious shell writes are
- * path checked; dynamic evaluation, detached launchers, and arbitrary interpreter
- * scripts are blocked. Package/build/test runners and shells are denied because
- * no OS sandbox is available. The runtime filesystem monitor independently checks
- * synchronous writes that still slip through.
- */
-/** Shell env assignments (including LD_PRELOAD/PATH) and `env VAR=…` loaders. */
-function hasEnvAssignmentIndirection(input: string[]): boolean {
-	let words = [...input];
-	while (words.length) {
-		if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[0] ?? "")) return true;
-		const exe = executableName(words[0] ?? "");
-		if (exe === "sudo") {
-			words.shift();
-			while (words[0]?.startsWith("-")) {
-				const option = words.shift();
-				if (option === "-u" || option === "-g" || option === "-h" || option === "-p") words.shift();
-			}
-			continue;
-		}
-		if (exe === "command" || exe === "exec") {
-			words.shift();
-			while (words[0]?.startsWith("-")) words.shift();
-			continue;
-		}
-		if (exe === "env") {
-			words.shift();
-			for (let i = 0; i < words.length; i++) {
-				const word = words[i];
-				if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) return true;
-				if (word === "-u" || word === "--unset") {
-					i += 1;
-					continue;
-				}
-				if (word.startsWith("-")) continue;
-				words = words.slice(i);
-				break;
-			}
-			continue;
-		}
-		return false;
-	}
-	return false;
-}
-
-export function inspectBashCommand(
-	command: string,
-	cwd: string,
-	allowed: string[],
-	forbidden: string[],
-	depth = 0,
-): BashInspection {
-	if (depth > 8) return { ok: false, reason: "shell indirection depth limit exceeded" };
-	if (!command.trim()) return { ok: true };
-	if (allowed.length === 0) return { ok: false, reason: "native implementation worker has empty allowed_scope" };
-	if (command.includes("$(") || command.includes("`")) {
-		return { ok: false, reason: "dynamic command substitution is not allowed from worker bash" };
-	}
-	// Process substitution `>(…)`, `<(…)`, `=(…)` writes/reads via FIFOs the small parser cannot scope-check.
-	if (/<\(|>\(|=\(/u.test(command)) {
-		return { ok: false, reason: "process substitution is not allowed from worker bash" };
-	}
-	const lexed = lexShell(command);
-	if (!lexed.ok) return { ok: false, reason: lexed.error };
-	if (lexed.tokens.some((token) => token.kind === "op" && token.value === "&")) {
-		return { ok: false, reason: "background/detached shell execution with '&' is not allowed" };
-	}
-
-	for (const segment of shellSegments(lexed.tokens)) {
-		const words = commandWords(segment);
-		if (hasEnvSplitPrefix(words)) {
-			return { ok: false, reason: "env split-string command indirection cannot be scope-checked" };
-		}
-		if (hasEnvAssignmentIndirection(words)) {
-			return {
-				ok: false,
-				reason: "env-prefix assignment cannot be scope-checked (loader/PATH injection)",
-			};
-		}
-		if (gitWordsAreBlocked(words)) return { ok: false, reason: "blocked git state-changing command" };
-		const stripped = stripCommandPrefixes(words);
-		const exe = executableName(stripped[0] ?? "");
-		if (DETACH_COMMANDS.has(exe)) {
-			return { ok: false, reason: `delayed/detached process launcher is not allowed: ${exe}` };
-		}
-		if (isDirectScriptExecutable(stripped[0] ?? "")) {
-			return { ok: false, reason: `direct script execution cannot be monitored fail-closed: ${stripped[0]}` };
-		}
-		if (/[\s\$%`]/u.test(stripped[0] ?? "")) {
-			return { ok: false, reason: "dynamic shell executable cannot be scope-checked" };
-		}
-		if (exe === "eval" || exe === "source" || exe === ".") {
-			return { ok: false, reason: `dynamic shell evaluator is not allowed: ${exe}` };
-		}
-		if (!isBashAllowlistedExecutable(exe)) {
-			return {
-				ok: false,
-				reason: `bash command not on read-only allowlist (writers cannot be scope-sandboxed by parser): ${exe || "(empty)"}`,
-			};
-		}
-		// Defense-in-depth for python (informational flags only). Shells/node/etc. are
-		// already denied by the allowlist gate above.
-		const isPython = exe === "py" || /^python(?:\d+(?:\.\d+)*)?$/u.test(exe);
-		if (isPython) {
-			const args = stripped.slice(1);
-			const hasInlineEval = args.some((w) =>
-				w === "-c" || w.startsWith("-c=") || (w.startsWith("-c") && w.length > 2),
-			);
-			const usesStdinProgram = args.length === 0 || args.includes("-") || segment.some((t) => t.kind === "op" && t.value === "<<");
-			if (hasInlineEval || usesStdinProgram) {
-				return { ok: false, reason: `inline ${exe} code is not allowed from worker bash` };
-			}
-			const informational = args.some((w) => ["-v", "-V", "--version", "-h", "--help"].includes(w));
-			if (!informational) {
-				return { ok: false, reason: `python script/module execution cannot be monitored fail-closed` };
-			}
-		}
-
-		const nested = nestedCommand(words);
-		if (nested !== null) {
-			if (!nested.trim()) return { ok: false, reason: "shell indirection has an empty/dynamic command" };
-			const inner = inspectBashCommand(nested, cwd, allowed, forbidden, depth + 1);
-			if (!inner.ok) return inner;
-		}
-
-		for (let i = 0; i < segment.length; i++) {
-			const token = segment[i];
-			if (token.kind === "op" && /^\d*(?:>|>>|<|<<|>\|)&(?:\d+|-)$/u.test(token.value)) continue;
-			if (token.kind !== "op" || !/^(?:\d*>|\d*>>|\d*>\||&>|&>>)$/u.test(token.value)) continue;
-			const target = segment[i + 1];
-			if (!target || target.kind !== "word") {
-				return { ok: false, reason: "dynamic or malformed shell redirection target" };
-			}
-			const targetError = inspectWriteTarget(target.value, cwd, allowed, forbidden);
-			if (targetError) return { ok: false, reason: targetError };
-		}
-
-		if (exe === "tee") {
-			let optionMode = true;
-			for (const target of stripped.slice(1)) {
-				if (optionMode && target === "--") { optionMode = false; continue; }
-				if (optionMode && target.startsWith("-")) continue;
-				optionMode = false;
-				const targetError = inspectWriteTarget(target, cwd, allowed, forbidden);
-				if (targetError) return { ok: false, reason: targetError };
-			}
-		}
-	}
-	return { ok: true };
+	return {
+		block: true,
+		reason:
+			"pi-meta-loop scope guard: bash is not available to scoped native workers. " +
+			"Build/test is the controller's trusted verify (executor.verifyCommands); " +
+			"file changes go through write/edit inside allowed_scope.",
+	};
 }
 
 /**
  * Install the tool-call guard on an extension host.
  *
- * Split out from the default export so the role-io extension can carry it: a
- * Worker subprocess loads exactly one `-e` extension, and it needs both the
- * guard and the submission tool.
+ * Split out from the default export so the role-io extension can carry it: a Worker
+ * subprocess loads exactly one `-e` extension, and it needs both the guard and its
+ * submission tool.
  */
 export function installScopeGuard(pi: ExtensionAPI): void {
 	const cwd = process.env.PI_META_LOOP_CWD || process.cwd();
@@ -531,15 +56,18 @@ export function installScopeGuard(pi: ExtensionAPI): void {
 	const forbidden = parseList(process.env.PI_META_LOOP_FORBIDDEN);
 
 	pi.on("tool_call", async (event) => {
-		// Defense in depth: bash is never granted to scoped native workers. Do not
-		// consult the command inspector — config/alias/args cannot re-enable it.
+		// Never consult a command inspector here: config, aliases and args cannot
+		// re-enable a shell for a scoped worker, so there is nothing to inspect.
 		if (event.toolName === "bash") {
 			return denyWorkerBashToolCall();
 		}
 
 		if (!MUTATING.has(event.toolName)) return;
 		if (allowed.length === 0) {
-			return { block: true, reason: "pi-meta-loop scope guard: native implementation worker has empty allowed_scope" };
+			return {
+				block: true,
+				reason: "pi-meta-loop scope guard: native implementation worker has empty allowed_scope",
+			};
 		}
 		const input = event.input as Record<string, unknown>;
 		const filePath = String(input.path ?? input.file_path ?? "");
