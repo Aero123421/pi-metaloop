@@ -846,7 +846,7 @@ export async function runSupervisedTask(
 				attempt === 1
 					? "Decompose the user request into executable tickets."
 					: [
-							"RETRY: your previous response was not valid parseable JSON with a non-empty tasks array.",
+							`RETRY: the previous plan was refused — ${lastErr}`,
 							"Emit ONLY one JSON object (optional ```json fence). No prose before/after.",
 							"Keep goals/acceptance to one short line each. Prefer fewer, smaller tickets.",
 					  ].join(" "),
@@ -885,6 +885,18 @@ export async function runSupervisedTask(
 			const parsed = parseInitialPlanRun(run, config.limits.maxTasks);
 			if (!parsed.ok) {
 				lastErr = parsed.error;
+				continue;
+			}
+			// Ticket rules are checked here, not first at execute time. The execute-time
+			// gate is the same function; reaching it with a plan that cannot pass means the
+			// Supervisor was asked to audit work the harness had already decided to block,
+			// and the user pays for an audit and a stopped run to learn it.
+			const rejected = parsed.tickets
+				.map((t) => ({ id: t.id, error: validateTicket(t, scopeCeiling) }))
+				.filter((x): x is { id: string; error: string } => Boolean(x.error));
+			if (rejected.length > 0) {
+				lastErr = `tickets the harness would block: ${rejected.map((r) => `${r.id}: ${r.error}`).join("; ")}`;
+				notify(hooks, board, `planning: plan rejected — ${rejected.length} unusable ticket(s)`);
 				continue;
 			}
 			board.planSummary = parsed.planSummary;
@@ -964,6 +976,18 @@ export async function runSupervisedTask(
 		const merged = mergeRevisedTicketsDetailed(board.tickets, tasks, config.limits.maxTasks);
 		if (!merged.ok) {
 			const detail = merged.detail ? `${merged.reason} (${merged.detail})` : merged.reason;
+			record(`rejected: ${detail}`);
+			return { ok: false, reason: detail };
+		}
+		// Same gate as planning: a revision may not introduce a ticket the harness would
+		// block, or the "fix" produces a board that stops on its first execute step.
+		const unusable = merged.tickets
+			.map((t) => ({ id: t.id, error: validateTicket(t, scopeCeiling) }))
+			.filter((x): x is { id: string; error: string } => Boolean(x.error));
+		if (unusable.length > 0) {
+			const detail = `revised tickets the harness would block: ${unusable
+				.map((u) => `${u.id}: ${u.error}`)
+				.join("; ")}`;
 			record(`rejected: ${detail}`);
 			return { ok: false, reason: detail };
 		}

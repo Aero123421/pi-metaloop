@@ -205,3 +205,92 @@ describe("execute loop: a yellow verdict must not be able to kill the run silent
 		cleanup(cwd);
 	});
 });
+
+describe("execute loop: a plan the harness would block never reaches the Supervisor", () => {
+	const BAD_PLAN = {
+		summary: "no write scope",
+		open_questions: [],
+		tasks: [
+			{
+				id: "t1",
+				goal: "implement the thing",
+				deliverables: ["src/thing.ts"],
+				acceptance: ["src/thing.ts exists"],
+				allowed_scope: [],
+				forbidden: [],
+				dependencies: [],
+				context: "",
+			},
+		],
+	};
+
+	it("retries planning with the reason, instead of auditing a doomed plan", async () => {
+		const cwd = tmpCwd();
+		const rec = recorder((role, task, nth) => {
+			if (role === "orchestrator") return nth === 1 ? fence(BAD_PLAN) : fence(PLAN);
+			if (role === "supervisor") return fence({ verdict: "green", scope: "overall", observations: [] });
+			return WORKER_REPORT;
+		});
+
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: rec.runRole as never,
+		});
+
+		// Two planning calls, and the Supervisor only ever saw the usable plan.
+		assert.equal(rec.roles.filter((r) => r === "orchestrator").length, 2);
+		assert.equal(rec.roles[0], "orchestrator");
+		assert.equal(rec.roles[1], "orchestrator");
+		assert.equal(rec.roles[2], "supervisor");
+		assert.ok(result.board.tickets.length > 0);
+		cleanup(cwd);
+	});
+
+	it("spends no audit at all when planning cannot produce a usable plan", async () => {
+		const cwd = tmpCwd();
+		const rec = recorder((role) => {
+			if (role === "orchestrator") return fence(BAD_PLAN);
+			if (role === "supervisor") return fence({ verdict: "green", scope: "overall", observations: [] });
+			return WORKER_REPORT;
+		});
+
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: rec.runRole as never,
+		});
+
+		assert.equal(result.board.phase, "plan_failed");
+		assert.ok(!rec.roles.includes("supervisor"), "no Supervisor call for a plan that cannot run");
+		assert.ok(!rec.roles.includes("worker"));
+		assert.match(result.board.planSummary, /allowed_scope/);
+		cleanup(cwd);
+	});
+
+	it("refuses a revision that would introduce an unusable ticket", async () => {
+		const cwd = tmpCwd();
+		const artifactDir = path.join(cwd, "artifacts");
+		fs.mkdirSync(artifactDir, { recursive: true });
+
+		const rec = recorder((role, _task, nth) => {
+			// Plan is fine; the revision the Supervisor forces is not.
+			if (role === "orchestrator") return nth === 1 ? fence(PLAN) : fence(BAD_PLAN);
+			if (role === "supervisor") {
+				return fence({
+					verdict: "yellow",
+					scope: "overall",
+					observations: ["narrow the scope"],
+					orchestrator_guidance: ["drop the write scope"],
+				});
+			}
+			return WORKER_REPORT;
+		});
+
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			artifactDir,
+			runRole: rec.runRole as never,
+		});
+
+		const blocked = result.board.tickets.filter((t) => t.status === "blocked");
+		assert.ok(blocked.length > 0);
+		assert.match(blocked[0]!.error ?? "", /allowed_scope/);
+		cleanup(cwd);
+	});
+});
