@@ -66,6 +66,13 @@ export interface RuntimeHooks {
 	artifactDir?: string;
 	/** Headless STOP poll (e.g. STOP file). Checked each execute-loop iteration. */
 	stopCheck?: () => boolean;
+	/**
+	 * Test seam. The loop's failure modes live in the *composition* of role calls —
+	 * a Supervisor that keeps returning yellow, an Orchestrator whose revision is an
+	 * echo — and no unit test of the pure helpers can reach them. Production leaves
+	 * this undefined and spawns real subprocesses.
+	 */
+	runRole?: typeof runRole;
 }
 
 export interface RuntimeResult {
@@ -229,15 +236,33 @@ function pendingRevisionFingerprint(tickets: Ticket[]): string {
  * on top of already-frozen tickets. A yellow revision must be material and must
  * leave actual pending remediation; echoing the board can never unlock re-audit.
  */
-export function mergeRevisedTickets(
+/**
+ * Why a revision was refused. A bare "revision failed" is what two production runs
+ * left behind, and it is not enough to tell a plan-shape problem from a parse
+ * problem from the Orchestrator being asked for something a ticket list cannot
+ * express. The cause reaches the blocked ticket and the run artifacts.
+ */
+export type MergeRejection =
+	| "empty-task-list"
+	| "frozen-exceeds-cap"
+	| "exceeds-cap"
+	| "invalid-graph"
+	| "no-pending-remediation"
+	| "unchanged-echo";
+
+export type MergeResult = { ok: true; tickets: Ticket[] } | { ok: false; reason: MergeRejection; detail?: string };
+
+export function mergeRevisedTicketsDetailed(
 	current: Ticket[],
 	rawTasks: any[],
 	maxTasks: number,
-): Ticket[] | null {
-	if (!Array.isArray(rawTasks) || rawTasks.length === 0) return null;
+): MergeResult {
+	if (!Array.isArray(rawTasks) || rawTasks.length === 0) return { ok: false, reason: "empty-task-list" };
 	const ceiling = Math.max(0, Math.floor(maxTasks));
 	const frozen = current.filter((t) => t.status !== "pending");
-	if (frozen.length > ceiling) return null;
+	if (frozen.length > ceiling) {
+		return { ok: false, reason: "frozen-exceeds-cap", detail: `${frozen.length} non-pending tickets > cap ${ceiling}` };
+	}
 
 	const next: Ticket[] = [...frozen];
 	const frozenIds = new Set(frozen.map((t) => t.id));
@@ -250,10 +275,27 @@ export function mergeRevisedTickets(
 		if (previous && previous.status !== "pending") continue;
 		next.push(toTicket(raw, i, previous));
 	}
-	if (next.length > ceiling || validatePlanGraph(next)) return null;
-	if (!next.some((ticket) => ticket.status === "pending")) return null;
-	if (pendingRevisionFingerprint(next) === pendingRevisionFingerprint(current)) return null;
-	return next;
+	if (next.length > ceiling) {
+		return { ok: false, reason: "exceeds-cap", detail: `${next.length} tickets > cap ${ceiling}` };
+	}
+	const graphError = validatePlanGraph(next);
+	if (graphError) return { ok: false, reason: "invalid-graph", detail: graphError };
+	if (!next.some((ticket) => ticket.status === "pending")) {
+		return { ok: false, reason: "no-pending-remediation" };
+	}
+	if (pendingRevisionFingerprint(next) === pendingRevisionFingerprint(current)) {
+		return {
+			ok: false,
+			reason: "unchanged-echo",
+			detail: "pending work is identical to the board it was asked to revise",
+		};
+	}
+	return { ok: true, tickets: next };
+}
+
+export function mergeRevisedTickets(current: Ticket[], rawTasks: any[], maxTasks: number): Ticket[] | null {
+	const result = mergeRevisedTicketsDetailed(current, rawTasks, maxTasks);
+	return result.ok ? result.tickets : null;
 }
 
 /** Full or compact ticket JSON for Supervisor. */
@@ -741,10 +783,13 @@ export async function runSupervisedTask(
 	const guidanceLog: string[] = [];
 	/** Mid-run Supervisor calls spent so far (initial/final audits are never budgeted). */
 	let supervisions = 0;
+	let reviseAttempts = 0;
+	let superviseCalls = 0;
 	// Role subprocesses already report tokens and cost; aggregate them so the run
 	// can show its own spend.
 	const usage = emptyRunUsage();
 
+	const callRole = hooks.runRole ?? runRole;
 	const orchestrator = loadRole("orchestrator", config.roles.orchestrator);
 	const supervisor = loadRole("supervisor", config.roles.supervisor);
 	const worker = loadRole("worker", config.roles.worker);
@@ -813,7 +858,7 @@ export async function runSupervisedTask(
 				orchestratorStandards,
 			].join("\n");
 			notify(hooks, board, `planning: Orchestrator attempt ${attempt}/2`);
-			const run = await runRole(orchestrator, prompt, {
+			const run = await callRole(orchestrator, prompt, {
 				cwd,
 				signal: hooks.signal,
 				timeoutSec: heavyTimeoutSec,
@@ -853,7 +898,10 @@ export async function runSupervisedTask(
 	}
 
 	/** @returns false when output empty/invalid or graph rejects the patch (caller must fail-closed). */
-	async function orchestratorRevise(guidance: string[], reason: string): Promise<boolean> {
+	async function orchestratorRevise(
+		guidance: string[],
+		reason: string,
+	): Promise<{ ok: true } | { ok: false; reason: string }> {
 		const prompt = [
 			`Supervisor injected guidance during work (reason: ${reason}).`,
 			"Revise ONLY pending tickets. Emit full ticket list JSON.",
@@ -871,7 +919,7 @@ export async function runSupervisedTask(
 			userRequest(input),
 			orchestratorStandards,
 		].join("\n");
-		const run = await runRole(orchestrator, prompt, {
+		const run = await callRole(orchestrator, prompt, {
 			cwd,
 			signal: hooks.signal,
 			timeoutSec: heavyTimeoutSec,
@@ -879,16 +927,50 @@ export async function runSupervisedTask(
 			onProgress: hooks.onActivity,
 		});
 		addUsage(usage, run.usage);
-		if (run.exitCode !== 0) return false;
+		reviseAttempts++;
+
+		// Persist before judging. A failed revision blocks every pending ticket and ends
+		// the run; without the raw output that outcome is not diagnosable afterwards,
+		// which is exactly what two production runs left behind.
+		const record = (outcome: string) => {
+			writeHookArtifact(
+				hooks.artifactDir,
+				`revise-attempt-${reviseAttempts}.txt`,
+				[
+					`outcome: ${outcome}`,
+					`reason: ${reason}`,
+					`exitCode: ${run.exitCode}`,
+					"",
+					"## guidance",
+					...guidance.map((g) => `- ${g}`),
+					"",
+					"## raw output",
+					run.output || "(empty)",
+				].join("\n"),
+			);
+		};
+
+		if (run.exitCode !== 0) {
+			record(`rejected: orchestrator exited ${run.exitCode}`);
+			return { ok: false, reason: `orchestrator exited ${run.exitCode}` };
+		}
 		const revised = extractJson<any>(run.output);
 		const tasks = Array.isArray(revised) ? revised : revised?.tasks;
-		if (!Array.isArray(tasks) || tasks.length === 0) return false;
+		if (!Array.isArray(tasks) || tasks.length === 0) {
+			record("rejected: no usable ticket JSON in the output");
+			return { ok: false, reason: "no usable ticket JSON in the revision output" };
+		}
 
-		const next = mergeRevisedTickets(board.tickets, tasks, config.limits.maxTasks);
-		if (!next) return false;
-		board.tickets = next;
+		const merged = mergeRevisedTicketsDetailed(board.tickets, tasks, config.limits.maxTasks);
+		if (!merged.ok) {
+			const detail = merged.detail ? `${merged.reason} (${merged.detail})` : merged.reason;
+			record(`rejected: ${detail}`);
+			return { ok: false, reason: detail };
+		}
+		record("accepted");
+		board.tickets = merged.tickets;
 		if (revised && !Array.isArray(revised) && revised.summary) board.planSummary = revised.summary;
-		return true;
+		return { ok: true };
 	}
 
 	async function runSupervision(stage: "initial" | "mid" | "final", reason: string): Promise<Verdict | null> {
@@ -939,7 +1021,7 @@ export async function runSupervisedTask(
 			"",
 			"Respond with the verdict JSON only.",
 		].join("\n");
-		const run = await runRole(supervisor, task, {
+		const run = await callRole(supervisor, task, {
 			cwd,
 			signal: hooks.signal,
 			timeoutSec: heavyTimeoutSec,
@@ -952,8 +1034,25 @@ export async function runSupervisedTask(
 		if (stage === "mid") supervisions++;
 		stats.lastReviewAt = Date.now();
 		stats.startsSinceReview = 0;
+		superviseCalls++;
+		const v = run.exitCode === 0 ? extractJson<Verdict>(run.output) : undefined;
+		const usable = Boolean(v && (v.verdict === "green" || v.verdict === "yellow" || v.verdict === "red"));
+		// An initial audit that cannot be parsed stops the run before any ticket executes.
+		// Keep the raw output so that outcome can be explained afterwards.
+		writeHookArtifact(
+			hooks.artifactDir,
+			`supervise-${stage}-${superviseCalls}.txt`,
+			[
+				`stage: ${stage}`,
+				`reason: ${reason}`,
+				`exitCode: ${run.exitCode}`,
+				`verdict: ${usable ? v?.verdict : "(unusable)"}`,
+				"",
+				"## raw output",
+				run.output || "(empty)",
+			].join("\n"),
+		);
 		if (run.exitCode !== 0) return null;
-		const v = extractJson<Verdict>(run.output);
 		if (!v || !v.verdict) return null;
 		if (v.verdict !== "green" && v.verdict !== "yellow" && v.verdict !== "red") return null;
 		return {
@@ -1012,14 +1111,17 @@ export async function runSupervisedTask(
 			guidanceLog.push(...disposition.guidance);
 			notify(hooks, board, "revision: injecting guidance into Orchestrator");
 			const revised = await orchestratorRevise(disposition.guidance, reason);
-			if (!revised) {
+			if (!revised.ok) {
 				// Yellow required revision failed → block work and stop (fail closed).
+				// Carry the cause: "revision failed" alone cannot tell a parse problem from a
+				// plan-shape problem from guidance a ticket list cannot express.
+				const cause = `blocked: orchestrator revision rejected after yellow verdict — ${revised.reason}`;
 				for (const t of board.tickets) if (t.status === "pending" || t.status === "running") {
 					t.status = "blocked";
-					t.error = t.error || "blocked: orchestrator revision failed after yellow verdict";
+					t.error = t.error || cause;
 				}
 				board.phase = "stopped";
-				notify(hooks, board, "stopped: yellow required revision failed");
+				notify(hooks, board, `stopped: revision rejected (${revised.reason})`);
 				return "stopped";
 			}
 			// A revised plan is never trusted without another Supervisor audit.
@@ -1290,7 +1392,7 @@ export async function runSupervisedTask(
 				verify: unsetVerifyEvidence("skipped: pre-evidence failed"),
 			};
 		} else {
-			const run = await runRole(worker, workerTask, {
+			const run = await callRole(worker, workerTask, {
 				cwd,
 				signal: hooks.signal,
 				timeoutSec: workerTimeoutSec,
