@@ -14,7 +14,6 @@ import {
 	diffGitSnapshots,
 	findScopeViolations,
 } from "../src/evidence.ts";
-import { isBlockedGitBashCommand } from "../src/scope-guard.ts";
 
 function git(cwd: string, args: string[]): string {
 	const r = spawnSync("git", args, {
@@ -221,44 +220,3 @@ describe("captureGitSnapshot / diffGitSnapshots (real git)", () => {
 	});
 });
 
-describe("scope-guard bash git blocks", () => {
-	it("blocks git worktree/index/HEAD/ref mutations", () => {
-		assert.equal(isBlockedGitBashCommand("git commit -m 'x'"), true);
-		assert.equal(isBlockedGitBashCommand("git push origin main"), true);
-		assert.equal(isBlockedGitBashCommand("git reset --hard"), true);
-		assert.equal(isBlockedGitBashCommand("git checkout -b feature"), true);
-		assert.equal(isBlockedGitBashCommand("git clean -fd"), true);
-		assert.equal(isBlockedGitBashCommand("git restore ."), true);
-		assert.equal(isBlockedGitBashCommand("git stash push -m x"), true);
-		assert.equal(isBlockedGitBashCommand("git add src/x.ts"), true);
-		assert.equal(isBlockedGitBashCommand("git merge topic"), true);
-		assert.equal(isBlockedGitBashCommand("git rebase main"), true);
-		assert.equal(isBlockedGitBashCommand("git switch topic"), true);
-		assert.equal(isBlockedGitBashCommand("git -c alias.ship=push ship"), true);
-		assert.equal(isBlockedGitBashCommand("git status | git push origin main"), true);
-		assert.equal(isBlockedGitBashCommand("npm test && git commit -am 'x'"), true);
-		assert.equal(isBlockedGitBashCommand("git -C /tmp/repo commit -m x"), true);
-		assert.equal(isBlockedGitBashCommand("git.exe commit -m x"), true);
-		assert.equal(isBlockedGitBashCommand("env FLAG=1 git.exe push origin main"), true);
-		assert.equal(isBlockedGitBashCommand("sh -c 'git commit -m x'"), true);
-		assert.equal(isBlockedGitBashCommand('cmd /c "git.exe reset --hard"'), true);
-	});
-
-	it("allows read-only git and non-git commands", () => {
-		assert.equal(isBlockedGitBashCommand("git status"), false);
-		assert.equal(isBlockedGitBashCommand("git diff --stat"), false);
-		assert.equal(isBlockedGitBashCommand("git log -1"), false);
-		assert.equal(isBlockedGitBashCommand("git rev-parse HEAD"), false);
-		assert.equal(isBlockedGitBashCommand("npm test"), false);
-		assert.equal(isBlockedGitBashCommand("echo git commit"), false);
-	});
-
-	it("blocks git file-output and helper/pager injection side channels", () => {
-		assert.equal(isBlockedGitBashCommand("git diff --output=.git/config HEAD"), true);
-		assert.equal(isBlockedGitBashCommand("git diff --no-index --output=pwned /dev/null README.md"), true);
-		assert.equal(isBlockedGitBashCommand("git -c core.pager=evil log -1"), true);
-		assert.equal(isBlockedGitBashCommand("git -ccore.pager=evil log -1"), true);
-		assert.equal(isBlockedGitBashCommand("GIT_PAGER=evil git log -1"), true);
-		assert.equal(isBlockedGitBashCommand("env GIT_EXTERNAL_DIFF=evil git diff HEAD"), true);
-	});
-});

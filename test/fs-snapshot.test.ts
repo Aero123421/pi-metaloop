@@ -9,7 +9,6 @@ import {
 	filesystemEvidencePath,
 } from "../src/fs-snapshot.ts";
 import { checkPath, findScopeViolations } from "../src/evidence.ts";
-import { inspectBashCommand } from "../src/scope-guard.ts";
 
 function fixture(): { parent: string; cwd: string; cleanup: () => void } {
 	const parent = fs.mkdtempSync(path.join(os.tmpdir(), "meta-loop-fs-"));
@@ -217,106 +216,8 @@ describe("bounded implementation-worker filesystem snapshots", () => {
 			assert.equal(result.ok, false, "symlink ancestor must not authorize external writes");
 			assert.match(result.reason ?? "", /outside|allowed_scope|not allowed/i);
 
-			// Production write path (bash redirection) must also refuse.
-			const bash = inspectBashCommand(`printf pwned > ${deep}`, f.cwd, ["src/**"], []);
-			assert.equal(bash.ok, false);
-			assert.match(bash.reason ?? "", /outside|allowed_scope|not allowed|scope/i);
-
-			// Flag-based writers/exec bypass redirection checkPath; must not be success
-			// even when the lexical path looks in-scope via a symlink/junction ancestor.
-			for (const command of [
-				`sort -o ${deep} src/in.ts`,
-				`sort --output=${deep} src/in.ts`,
-				`yq -i '.x=1' ${deep}`,
-				`yq --inplace '.x=1' ${deep}`,
-				`diff --output=${deep} /dev/null README.md`,
-				`git diff --no-index --output=${deep} /dev/null README.md`,
-				`rg --pre=sh . ${deep}`,
-			]) {
-				const sneaky = inspectBashCommand(command, f.cwd, ["src/**"], []);
-				assert.equal(sneaky.ok, false, command);
-				assert.match(
-					sneaky.reason ?? "",
-					/allowlist|blocked git|outside|allowed_scope|not allowed|scope/i,
-					command,
-				);
-			}
-
-			// In-scope non-symlink path still allowed.
-			assert.equal(checkPath("src/ok.txt", f.cwd, ["src/**"], []).ok, true);
 		} finally {
 			f.cleanup();
 		}
-	});
-});
-
-describe("implementation-worker bash inspection", () => {
-	const cwd = process.cwd();
-	const allowed = ["src/**"];
-	const inspect = (command: string) => inspectBashCommand(command, cwd, allowed, []);
-
-	it("path-checks redirection and tee targets", () => {
-		assert.equal(inspect("printf ok > src/generated.ts").ok, true);
-		assert.equal(inspect("printf ok > ../escaped.txt").ok, false);
-		assert.equal(inspect("printf ok | tee src/generated.ts").ok, true);
-		assert.equal(inspect("printf ok | tee ../escaped.txt").ok, false);
-		assert.equal(inspect("printf ok 2>&1").ok, true);
-		assert.equal(inspect("printf ok > $TARGET").ok, false);
-	});
-
-	it("recurses through env/sh/cmd and blocks inline node/python", () => {
-		assert.equal(inspect("env sh -c 'printf ok > ../escaped.txt'").ok, false);
-		assert.equal(inspect('cmd /c "git.exe commit -m x"').ok, false);
-		assert.equal(inspect("node -e \"require('fs').writeFileSync('../x','x')\"").ok, false);
-		assert.equal(inspect("python -c \"open('../x','w').write('x')\"").ok, false);
-		assert.equal(inspect("python3.12 -c \"open('../x','w').write('x')\"").ok, false);
-		assert.equal(inspect("echo $(git commit -m x)").ok, false);
-		assert.equal(inspect("node --test test/unit.test.js").ok, false);
-		assert.equal(inspect("python scripts/check.py").ok, false);
-		assert.equal(inspect("touch ../../escaped").ok, false);
-	});
-
-	it("denies diff/git output flags and rg --pre without treating them as success", () => {
-		// Production repros: no '>' so checkPath never runs; reserved paths and
-		// child launch must still fail closed at inspectBashCommand.
-		for (const command of [
-			"diff --output=.git/config /dev/null README.md",
-			"git diff --no-index --output=.pi/meta-loop/runs/owner.lock.json /dev/null README.md",
-			"git diff --output=src/pwned.ts HEAD",
-			"GIT_EXTERNAL_DIFF=evil git diff HEAD",
-			"git -c core.pager=evil log -1",
-			"rg --pre=sh . src/payload.sh",
-			"rg --pre sh . src/payload.sh",
-		]) {
-			const result = inspect(command);
-			assert.equal(result.ok, false, command);
-			assert.match(result.reason ?? "", /allowlist|blocked git|env-prefix|loader|PATH/i, command);
-		}
-	});
-
-	it("fails closed on process substitution, base64 -o, and env-prefix PATH/LD_PRELOAD", () => {
-		for (const command of [
-			"cat <(printf x)",
-			"printf x > >(cat)",
-			"base64 -o ../escaped.txt src/a.ts",
-			"base64 --output=../escaped.txt src/a.ts",
-			"LD_PRELOAD=./x.so cat src/a.ts",
-			"PATH=/evil cat src/a.ts",
-			"env LD_PRELOAD=./x.so cat src/a.ts",
-		]) {
-			const result = inspect(command);
-			assert.equal(result.ok, false, command);
-			assert.match(
-				result.reason ?? "",
-				/process substitution|allowlist|env-prefix|loader|PATH/i,
-				command,
-			);
-		}
-	});
-
-	it("rejects an empty native allowed_scope", () => {
-		const result = inspectBashCommand("npm test", cwd, [], []);
-		assert.equal(result.ok, false);
-		assert.match(result.reason ?? "", /allowed_scope/);
 	});
 });

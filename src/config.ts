@@ -64,6 +64,20 @@ export interface ExecutorSettings {
  * a project layer cannot change these in either direction (see applyLayer).
  */
 export interface EvidenceSettings {
+	/**
+	 * Whether to take the full pre/post filesystem snapshot around every ticket.
+	 *
+	 * Off by default. Enforcement is the tool-call guard, which refuses an out-of-scope
+	 * write before it happens; this sweep can only notice afterwards. With bash denied
+	 * and the Worker restricted to interceptable built-ins, every write already passes
+	 * the guard, so the sweep's remaining value is catching a pi bug or another process
+	 * writing into the tree — worth two full directory walks per ticket only when you
+	 * are actually looking for that.
+	 *
+	 * The git snapshot is separate and always runs: it is cheap and it is how external
+	 * interference is told apart from the ticket's own work.
+	 */
+	filesystemSweep: boolean;
 	/** Directory names recorded but not descended into. */
 	ignoreDirNames: string[];
 	/** Depth below cwd's parent. 0 records direct entries without descending. */
@@ -217,6 +231,7 @@ const defaultConfig: MetaLoopConfig = {
 	},
 	escalation: { ...defaultEscalation },
 	evidence: {
+		filesystemSweep: false,
 		ignoreDirNames: [...DEFAULT_EVIDENCE_IGNORE_DIRS],
 		parentMaxDepth: DEFAULT_FILESYSTEM_SNAPSHOT_LIMITS.parentMaxDepth,
 		maxEntries: DEFAULT_FILESYSTEM_SNAPSHOT_LIMITS.maxEntries,
@@ -378,6 +393,8 @@ function applyLayer(merged: MetaLoopConfig, layer: Record<string, unknown> | nul
 		const E = layer.evidence as any;
 		const requestedIgnores = Array.isArray(E.ignoreDirNames) ? E.ignoreDirNames.map(String) : undefined;
 		merged.evidence = {
+			filesystemSweep:
+				typeof E.filesystemSweep === "boolean" ? E.filesystemSweep : merged.evidence.filesystemSweep,
 			ignoreDirNames: requestedIgnores ?? merged.evidence.ignoreDirNames,
 			parentMaxDepth: clampInt(E.parentMaxDepth ?? merged.evidence.parentMaxDepth, 0, 8),
 			maxEntries: clampInt(E.maxEntries ?? merged.evidence.maxEntries, 1_000, 5_000_000),

@@ -1062,6 +1062,7 @@ export async function runSupervisedTask(
 	// Planning / supervisor get 2× headroom vs worker wall-clock.
 	const heavyTimeoutSec = workerTimeoutSec * 2;
 	const verifyMode: VerifyMode = config.executor.verifyMode ?? "per-ticket";
+	const sweepFilesystem = config.evidence.filesystemSweep;
 	const snapshotLimits = {
 		ignoreDirNames: config.evidence.ignoreDirNames,
 		parentMaxDepth: config.evidence.parentMaxDepth,
@@ -1700,14 +1701,23 @@ export async function runSupervisedTask(
 		].join("\n");
 
 		// Native implementation workers: scope-guard only (--no-extensions), strict built-in
-		// tools, then controller-side trusted verify. FS monitor covers ignored/parent writes.
-		const beforeFs = captureFilesystemSnapshot(cwd, snapshotLimits);
+		// tools, then controller-side trusted verify.
+		//
+		// The filesystem sweep is opt-in. Every write a scoped Worker can make goes through
+		// the tool-call guard, which refuses out-of-scope paths *before* the write; walking
+		// the tree twice per ticket afterwards only catches a pi bug or another process, and
+		// costs two full directory scans to do it. The git snapshot always runs — it is cheap
+		// and it is how external interference is told apart from the ticket's own work.
+		const beforeFs = sweepFilesystem
+			? captureFilesystemSnapshot(cwd, snapshotLimits)
+			: undefined;
 		const beforeGit = captureGitSnapshot(cwd);
-		const preError = !beforeFs.ok
-			? `filesystem evidence failed (pre): ${beforeFs.error ?? "unknown"}`
-			: !beforeGit.ok
-				? `git evidence failed (pre): ${beforeGit.error ?? "unknown"}`
-				: undefined;
+		const preError =
+			beforeFs && !beforeFs.ok
+				? `filesystem evidence failed (pre): ${beforeFs.error ?? "unknown"}`
+				: !beforeGit.ok
+					? `git evidence failed (pre): ${beforeGit.error ?? "unknown"}`
+					: undefined;
 		if (preError) {
 			// The Worker never started, so this is an environment failure and not
 			// its fault. Inconclusive (never done), but not charged to the ticket.
@@ -1740,9 +1750,12 @@ export async function runSupervisedTask(
 				},
 			});
 			addUsage(usage, run.usage);
-			const afterFs = captureFilesystemSnapshot(cwd, snapshotLimits);
+			const afterFs = sweepFilesystem ? captureFilesystemSnapshot(cwd, snapshotLimits) : undefined;
 			const afterGit = captureGitSnapshot(cwd);
-			const fsEv = evaluateFilesystemEvidence(cwd, ticket, beforeFs, afterFs);
+			const fsEv =
+				beforeFs && afterFs
+					? evaluateFilesystemEvidence(cwd, ticket, beforeFs, afterFs)
+					: { actualChangedFiles: [], scopeViolations: [] };
 			// Scoped native workers have no shell, so git state changes here came
 			// from some other process in this worktree.
 			const gitEv = evaluateGitEvidence(cwd, ticket, beforeGit, afterGit, { gitCapableWorker: false });

@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Removed
+
+- The bash command inspector — roughly 450 lines of quote-aware lexer, git subcommand
+  classification, env-injection detection and redirection-target checking. It sat behind an
+  unconditional `bash` deny and could never run in production.
+
+  Its history is the argument for deleting it: eight consecutive hardening commits, each closing
+  one more write side-channel (awk, find, sort, yq, diff, rg, git, less…), ending in the
+  conclusion that per-command denylists do not converge and bash should simply be refused. Once
+  that landed, the inspector was decoration with a maintenance cost, and keeping it invited the
+  belief that bash could be re-enabled safely.
+
+### Changed
+
+- The post-run filesystem sweep is off by default (`evidence.filesystemSweep`). Enforcement is
+  the tool-call guard, which refuses an out-of-scope write *before* it happens; the sweep can
+  only notice afterwards and costs two full directory walks per ticket to do it. With bash
+  denied and the Worker restricted to interceptable built-ins, every write already passes the
+  guard. Turn it on when hunting a harness bug or another process writing into the tree.
+
+  The git snapshot still runs on every ticket — it is cheap, and it is how external interference
+  is distinguished from the ticket's own work.
+
 ### Added
 
 - `/ml-resume [runId]` — continue a run instead of starting over. The failed, blocked, cancelled

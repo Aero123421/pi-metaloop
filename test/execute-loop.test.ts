@@ -620,3 +620,54 @@ describe("resuming an existing board", () => {
 		cleanup(cwd);
 	});
 });
+
+describe("the filesystem sweep is opt-in", () => {
+	// Enforcement is the tool-call guard, which refuses an out-of-scope write before it
+	// happens. The sweep can only notice afterwards, and costs two full directory walks
+	// per ticket to do it.
+	function planFor(cwd: string) {
+		return recorder((role) => {
+			if (role === "orchestrator") return fence(PLAN);
+			if (role === "supervisor") return fence({ verdict: "green", scope: "overall", observations: [] });
+			return WORKER_REPORT;
+		});
+	}
+
+	it("runs a ticket without walking the tree, and still snapshots git", async () => {
+		const cwd = tmpCwd();
+		const rec = planFor(cwd);
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, config(), {
+			runRole: rec.runRole as never,
+		});
+		assert.ok(rec.roles.includes("worker"));
+		assert.equal(result.board.tickets[0]!.status, "completed");
+		cleanup(cwd);
+	});
+
+	it("a cwd whose parent cannot be read no longer blocks the run", async () => {
+		// This is the shape that made a temp-directory cwd fail before the worker even
+		// started: the parent scan hit files other processes hold open.
+		const cwd = tmpCwd();
+		const rec = planFor(cwd);
+		const cfg = config();
+		cfg.evidence.parentMaxDepth = 0;
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, cfg, {
+			runRole: rec.runRole as never,
+		});
+		assert.equal(result.board.tickets[0]!.status, "completed");
+		cleanup(cwd);
+	});
+
+	it("still collects filesystem evidence when the user asks for it", async () => {
+		const cwd = tmpCwd();
+		const rec = planFor(cwd);
+		const cfg = config();
+		cfg.evidence.filesystemSweep = true;
+		const result = await runSupervisedTask({ goal: "ship it" }, cwd, cfg, {
+			runRole: rec.runRole as never,
+		});
+		assert.ok(rec.roles.includes("worker"));
+		assert.ok(result.board.tickets[0]!.evidence, "the sweep still produces evidence when enabled");
+		cleanup(cwd);
+	});
+});

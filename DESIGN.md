@@ -94,9 +94,16 @@ at the same time.
   their creation and deletion stay visible, but not descended into)
 - cwd's parent, **direct entries only** by default (`evidence.parentMaxDepth`)
 
+The sweep is **off by default** (`evidence.filesystemSweep`). Enforcement is the scope guard at
+tool-call time, which refuses an out-of-scope write before it happens; the sweep can only notice
+afterwards, at the cost of two full directory walks per ticket. With bash denied and the Worker
+holding only interceptable built-ins, every write already passes the guard, so what remains is
+catching a pi bug or another process — worth paying for when you are looking for that, not by
+default. The git snapshot always runs: it is cheap, and it is how external interference is told
+apart from the ticket's own work.
+
 Dependency, build, and cache trees and sibling projects are left out because writes there are not
-the ticket's doing — attributing them produced violations no Worker caused. Real enforcement is
-the scope guard at tool-call time; this sweep is a detection backstop.
+the ticket's doing — attributing them produced violations no Worker caused.
 
 ## Configuration
 
@@ -120,8 +127,10 @@ disables meta-loop and the reason is reported by `/ml-doctor`.
 
 ## Known limitations
 
-- Per-command bash denylists do not converge, so a scoped native Worker gets no bash at all
-  (built-ins + scope + evidence instead).
+- Per-command bash denylists do not converge, so a scoped native Worker gets no bash at all.
+  Eight rounds of hardening each closed one more write side-channel and the next one always
+  existed; the inspector those rounds produced was removed once the unconditional deny made it
+  unreachable.
 - Only the native pi worker exists as an executor. Scope is enforced by intercepting tool calls,
   which is specific to pi; an executor without that interception could only be checked by the
   post-hoc sweep, which is a detection backstop rather than enforcement. Multi-CLI workers are
