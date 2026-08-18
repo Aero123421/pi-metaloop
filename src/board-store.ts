@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { TaskBoard, UsageStats, Verdict } from "./types.ts";
+import type { OrchestrateInput, TaskBoard, UsageStats, Verdict } from "./types.ts";
 
 export type RunStatus = "running" | "completed" | "error" | "stopped" | "incomplete";
 export const BOARD_SCHEMA_VERSION = 2;
@@ -30,6 +30,12 @@ export interface PersistedRun {
 	activity?: string;
 	/** Aggregated role-subprocess spend, when the runtime reported any. */
 	usage?: UsageStats;
+	/**
+	 * The request the run was started from. Without it a resumed run cannot rebuild the
+	 * prompts the plan was written against, and the board alone does not say what the
+	 * user actually asked for.
+	 */
+	input?: OrchestrateInput;
 }
 
 export interface OwnerLockHolder {
