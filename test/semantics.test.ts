@@ -8,6 +8,7 @@ import {
 	classifyVerdict,
 	finalizeFromEvidence,
 	mergeRevisedTickets,
+	mergeRevisedTicketsDetailed,
 	parseInitialPlanRun,
 	resolveTerminalPhase,
 	validateTicket,
@@ -374,6 +375,53 @@ describe("material yellow revision and maxTasks ceiling", () => {
 		assert.ok(revised);
 		assert.equal(revised.length, 2);
 		assert.equal(revised[0], running);
+	});
+});
+
+
+describe("a rejected revision says why", () => {
+	// Two production runs died with a bare "orchestrator revision failed after yellow
+	// verdict" and nothing on disk to tell the causes apart. Every rejection path must
+	// name itself so the blocked ticket and the run artifact can carry the cause.
+	const pending = baseTicket({ id: "p1", status: "pending" });
+
+	it("names an unchanged echo", () => {
+		const r = mergeRevisedTicketsDetailed([pending], [{ ...pending }], 2);
+		assert.equal(r.ok, false);
+		assert.equal(r.ok === false && r.reason, "unchanged-echo");
+	});
+
+	it("names an empty task list", () => {
+		const r = mergeRevisedTicketsDetailed([pending], [], 2);
+		assert.equal(r.ok === false && r.reason, "empty-task-list");
+	});
+
+	it("names a cap overflow and reports the numbers", () => {
+		const raw = Array.from({ length: 5 }, (_, i) => ({ ...baseTicket({ id: `n${i}` }) }));
+		const r = mergeRevisedTicketsDetailed([pending], raw, 3);
+		assert.equal(r.ok === false && r.reason, "exceeds-cap");
+		assert.match(r.ok === false ? (r.detail ?? "") : "", /cap 3/);
+	});
+
+	it("names an invalid graph and carries the validator's message", () => {
+		const raw = [{ ...baseTicket({ id: "a" }), dependencies: ["ghost"] }];
+		const r = mergeRevisedTicketsDetailed([pending], raw, 4);
+		assert.equal(r.ok === false && r.reason, "invalid-graph");
+		assert.ok(r.ok === false && (r.detail ?? "").length > 0);
+	});
+
+	it("names a revision that left no pending remediation", () => {
+		const done = baseTicket({ id: "d1", status: "done" });
+		const r = mergeRevisedTicketsDetailed([done], [{ ...done }], 2);
+		assert.equal(r.ok === false && r.reason, "no-pending-remediation");
+	});
+
+	it("still accepts a real revision, and the plain wrapper keeps its old shape", () => {
+		const raw = [{ ...pending, goal: "materially different work" }];
+		const r = mergeRevisedTicketsDetailed([pending], raw, 3);
+		assert.equal(r.ok, true);
+		assert.ok(mergeRevisedTickets([pending], raw, 3));
+		assert.equal(mergeRevisedTickets([pending], [{ ...pending }], 3), null);
 	});
 });
 

@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Added
+
+- A rejected revision now says why. `mergeRevisedTicketsDetailed` names the cause
+  (`unchanged-echo`, `exceeds-cap`, `invalid-graph`, `no-pending-remediation`,
+  `frozen-exceeds-cap`, `empty-task-list`) and the cause reaches both the blocked ticket's
+  error and a `revise-attempt-N.txt` artifact holding the guidance and the raw model output.
+
+  Two of the three persisted production runs died with every ticket blocked, zero executed,
+  and the same opaque string: `blocked: orchestrator revision failed after yellow verdict`.
+  Nothing on disk could tell a parse failure from a cap overflow from an Orchestrator that
+  echoed the board back because the guidance asked for something a ticket list cannot express.
+  A fail-closed harness whose most common death is undiagnosable is not fail-closed in any
+  useful sense.
+
+- Supervisor calls persist their raw output to `supervise-<stage>-N.txt`, including the ones
+  that produced no usable verdict. An unparseable initial audit stops the run before any
+  ticket executes; that outcome now leaves evidence behind.
+
+- `RuntimeHooks.runRole` — a test seam for the execute loop, and `test/execute-loop.test.ts`
+  driving `runSupervisedTask` through it. Until now no test touched `runSupervisedTask` at all:
+  every one of the 200-odd tests exercised an extracted pure function, which is why the
+  production failure above — a composition of individually correct parts — was invisible to
+  the suite.
+
 ### Removed
 
 - The sfh executor. `execution: "sfh"` group tickets, the flow YAML generator, the machine-contract
